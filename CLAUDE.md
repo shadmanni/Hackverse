@@ -65,23 +65,35 @@ The team is fully certified under the IBM SkillsBuild "Future Forward: AI for In
 
 ---
 
-## 5. ELABORATE PHASE-WISE EXECUTION ROADMAP
+## 5. DETAILED PHASE-WISE EXECUTION ROADMAP
 
-### PHASE 1: The "Smoke & Mirrors" MVP (Now – Sat 8:30 PM)
-* **Goal:** Deliver a 3-minute visual proof-of-concept making the "invisible" firewall visible.
-* **Execution:** Shivansh builds a local FastAPI endpoint simulating an SSE token stream that drops the socket with a `406 Not Acceptable: Entropy Spike` error. Shaurya builds the Streamlit UI to visualize the stream halting mid-sentence. Shadman creates `mock_celonis_data.json`. Riddhi prepares the predictive variance math breakdown.
+### PHASE 1: The "Smoke & Mirrors" MVP (Foundation)
+**Goal:** Deliver a visual proof-of-concept making the "invisible" firewall visible to secure the 8:30 PM evaluation score.
+* **Shivansh's Role:** Build a local FastAPI endpoint simulating an SSE token stream. Program it to intentionally drop the socket halfway through the stream with an `Entropy Spike` error to mock the interception.
+* **Shadman's Role:** Scaffold a `mock_celonis_data.json` file to prove the team's understanding of enterprise deterministic data structures.
+* **Riddhi's Role:** Map out the predictive variance math breakdown and threshold limits to verbally defend the logic to the judges.
+* **Shaurya's Role:** Build the initial Streamlit UI. Connect it to Shivansh's mock API to visually demonstrate the text stream halting mid-sentence when the error is thrown.
 
-### PHASE 2: Core Pipeline & Vectorization (Sat 8:30 PM – Sun 2:00 AM)
-* **Goal:** Establish genuine data flow from raw synthetic event logs to IBM Granite.
-* **Execution:** Connect Antigravity proxy to live IBM Granite API. Feed synthetic JSON logs into IBM Data Prep Kit for PII masking and embed into Milvus. Set up parallel draft model for log-probabilities.
+### PHASE 2: Core Pipeline & Dockerization
+**Goal:** Establish genuine data flow and package the architecture into a portable, universal runtime.
+* **Shivansh's Role:** Connect the FastAPI proxy to the live IBM Granite API. Write the backend `Dockerfile`.
+* **Shadman's Role:** Feed the synthetic JSON logs into the IBM Data Prep Kit to execute PII masking. Embed the sanitized data into the local Milvus vector database.
+* **Riddhi's Role:** Set up the parallel draft model logic capable of extracting real-time log-probabilities from Granite's context window.
+* **Shaurya's Role:** Use IBM Bob to auto-generate the `docker-compose.yml` file, linking the Milvus database, the FastAPI backend, and the frontend into a single deployable microservices network.
 
-### PHASE 3: The Interception Engine (Sun 2:00 AM – Sun 11:00 AM)
-* **Goal:** Live circuit breaker functions accurately on real token variance.
-* **Execution:** Merge log-probability calculator into Antigravity streaming loop. If $V(y_t) > \tau$, socket is aggressively closed. Milvus retriever connected to prompt pipeline. Self-healing trigger built into UI for fallback querying.
+### PHASE 3: The Interception Engine (The Core Integration)
+**Goal:** Prove the live circuit breaker functions accurately on real token variance during active generation.
+* **Shivansh's Role:** Merge Riddhi's log-probability calculator directly into the FastAPI streaming loop. Ensure that if the variance threshold is crossed, the socket connection to the client is aggressively and cleanly closed.
+* **Shadman's Role:** Connect the Milvus retriever to the prompt pipeline, ensuring Granite is strictly reasoning over the ingested Celonis data. 
+* **Riddhi's Role:** Fine-tune the math engine to feed real-time variance data smoothly to Shivansh's proxy without causing CPU bottlenecks.
+* **Shaurya's Role:** Build the self-healing trigger into the UI. When the proxy severs the socket, the frontend must instantly display a fallback loading state and query the recovery agent.
 
-### PHASE 4: Hardening & Enterprise Polish (Sun 11:00 AM – Sun 6:00 PM)
-* **Goal:** Secure "Technical Excellence" and "UX & Design" rubric marks.
-* **Execution:** Benchmark proxy loop for < 15ms latency. Finalize demo scripting (factual vs poison prompts). Automate threshold calibration for 0% false positives. Brand the Streamlit dashboard as a deployable SaaS Security Terminal.
+### PHASE 4: Hardening & Enterprise Polish
+**Goal:** Secure the "Technical Excellence" and "UX & Design" rubric marks for the final Monday presentation.
+* **Shivansh's Role:** Benchmark the proxy loop to guarantee the mathematical interception adds less than 15ms of latency overhead per token.
+* **Shadman's Role:** Finalize the demo script by writing explicit "Poison Prompts" designed to intentionally force the model to hallucinate during the live demo.
+* **Riddhi's Role:** Automate the threshold calibration to guarantee a 0% false-positive rate on factual queries.
+* **Shaurya's Role:** Brand the Streamlit dashboard as a sleek, deployable SaaS Security Terminal, ensuring the split-screen comparison is easily viewable by judges via local Wi-Fi.
 
 ---
 
