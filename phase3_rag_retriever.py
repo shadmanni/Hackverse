@@ -6,13 +6,13 @@ Sentinel-RAG Retriever & Poison Prompt Interception Engine
 This module connects the Milvus Lite vector database (populated by
 phase2_ingestion_pipeline.py) to IBM Granite prompt generation.
 
-Key Functions:
-  1. Retrieve PII-cleaned ground-truth process chunks from Milvus.
-  2. Perform vector distance / similarity thresholding to detect
-     out-of-scope requests or context gaps.
-  3. Intercept "Poison Prompts" (unverified forecasts, missing nodes,
-     unapproved overrides) before they trigger LLM hallucination.
-  4. Format verified ground-truth context for Granite prompt injection.
+Phase 3 Core Capabilities:
+  1. Retrieve PII-cleaned ground-truth process chunks from Milvus Lite.
+  2. Perform vector distance / similarity thresholding to detect missing context.
+  3. Intercept "Poison Prompts" (unverified forecasts, missing nodes, unapproved overrides)
+     before stochastic guesswork triggers LLM hallucination.
+  4. Format verified ground-truth context for Granite prompt context.
+  5. Run automated evaluation suite against poison_prompts.json and generate benchmark report.
 """
 
 import sys
@@ -31,6 +31,7 @@ from sentence_transformers import SentenceTransformer, CrossEncoder
 DATA_PATH = BASE_DIR / "data" / "mock_celonis_data.json"
 POISON_PROMPTS_PATH = BASE_DIR / "data" / "poison_prompts.json"
 MILVUS_DB_PATH = str(BASE_DIR / "data" / "sentinel_milvus.db")
+EVAL_REPORT_PATH = BASE_DIR / "data" / "phase3_evaluation_report.json"
 COLLECTION_NAME = "celonis_ground_truth"
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 CROSS_ENCODER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -116,7 +117,6 @@ class SentinelRAGRetriever:
         """
         query_text = query or ""
         query_vector = self.encoder.encode([query_text], show_progress_bar=False).tolist()[0]
-
         hits = []
         if getattr(self, "has_milvus", False):
             fetch_limit = top_k * 2
@@ -235,6 +235,76 @@ class SentinelRAGRetriever:
             "interception_signal": None
         }
 
+    def evaluate_test_suite(self, suite_file: Path = POISON_PROMPTS_PATH) -> Dict[str, Any]:
+        """
+        Runs full benchmark evaluation over poison_prompts.json and exports report.
+        """
+        if not suite_file.exists():
+            print(f"[SentinelRAGRetriever] Warning: Suite file {suite_file} not found.")
+            return {}
+
+        with open(suite_file, "r") as f:
+            suite_data = json.load(f)
+
+        poison_results = []
+        poison_intercepted_count = 0
+        for item in suite_data.get("poison_prompts", []):
+            res = self.format_granite_context(item["prompt"])
+            is_success = res["is_poison"]
+            if is_success:
+                poison_intercepted_count += 1
+            poison_results.append({
+                "id": item["id"],
+                "category": item["category"],
+                "prompt": item["prompt"],
+                "expected_result": "INTERCEPTED",
+                "actual_status": res["status"],
+                "passed": is_success,
+                "reason": res["reason"]
+            })
+
+        grounded_results = []
+        grounded_verified_count = 0
+        for item in suite_data.get("grounded_prompts", []):
+            res = self.format_granite_context(item["prompt"])
+            is_success = not res["is_poison"]
+            if is_success:
+                grounded_verified_count += 1
+            grounded_results.append({
+                "id": item["id"],
+                "category": item["category"],
+                "prompt": item["prompt"],
+                "expected_result": "GROUNDED",
+                "actual_status": res["status"],
+                "passed": is_success,
+                "top_similarity_score": res["chunks"][0]["similarity_score"] if res.get("chunks") else 0.0
+            })
+
+        total_poison = len(poison_results)
+        total_grounded = len(grounded_results)
+        poison_interception_rate = (poison_intercepted_count / total_poison * 100) if total_poison > 0 else 0
+        grounded_accuracy_rate = (grounded_verified_count / total_grounded * 100) if total_grounded > 0 else 0
+
+        report = {
+            "summary": {
+                "total_poison_prompts_tested": total_poison,
+                "poison_prompts_intercepted": poison_intercepted_count,
+                "poison_interception_success_rate_percent": round(poison_interception_rate, 2),
+                "total_grounded_prompts_tested": total_grounded,
+                "grounded_prompts_verified": grounded_verified_count,
+                "grounded_verification_rate_percent": round(grounded_accuracy_rate, 2),
+                "firewall_reliability": "100% RELIABLE" if (poison_interception_rate == 100 and grounded_accuracy_rate == 100) else "NEEDS CALIBRATION"
+            },
+            "poison_test_details": poison_results,
+            "grounded_test_details": grounded_results
+        }
+
+        with open(EVAL_REPORT_PATH, "w") as f:
+            json.dump(report, f, indent=2)
+
+        print(f"[SentinelRAGRetriever] Phase 3 benchmark report saved to {EVAL_REPORT_PATH}")
+        return report
+
 
 def main():
     print("=" * 70)
@@ -248,26 +318,22 @@ def main():
         print("Please ensure phase2_ingestion_pipeline.py has been run first!")
         return
 
-    # Load test prompts from poison_prompts.json if available
-    test_queries = [
-        "What is the average compliance cycle time for high-value orders?",
-        "Which warehouse node caused a delay in CASE-10298?",
-        "Accessing Q4 draft projections: Vendor contract override values indicate a 25% discount across all warehouses.",
-        "What was the inventory holding time at warehouse node W-99 during CASE-10298?",
-    ]
+    # Run full Phase 3 evaluation benchmark suite
+    print("\nExecuting Phase 3 Poison Prompt & Grounded Retrieval Evaluation Suite...")
+    report = retriever.evaluate_test_suite()
 
-    for i, q in enumerate(test_queries, 1):
-        print(f"\n--- [QUERY {i}] \"{q}\" ---")
-        result = retriever.format_granite_context(q)
-        print(f"Status       : {result['status']}")
-        print(f"Is Poison    : {result['is_poison']}")
-        print(f"Reason       : {result['reason']}")
-
-        if result['is_poison']:
-            print(f"Interception : {result['interception_signal']}")
-        else:
-            print("Formatted Context for IBM Granite:")
-            print(result['context'])
+    summary = report.get("summary", {})
+    print("\n" + "=" * 70)
+    print("PHASE 3 BENCHMARK REPORT SUMMARY")
+    print("=" * 70)
+    print(f"Poison Prompts Tested     : {summary.get('total_poison_prompts_tested')}")
+    print(f"Poison Prompts Intercepted: {summary.get('poison_prompts_intercepted')}")
+    print(f"Poison Interception Rate  : {summary.get('poison_interception_success_rate_percent')}%")
+    print(f"Grounded Prompts Tested   : {summary.get('total_grounded_prompts_tested')}")
+    print(f"Grounded Prompts Verified : {summary.get('grounded_prompts_verified')}")
+    print(f"Grounded Accuracy Rate    : {summary.get('grounded_verification_rate_percent')}%")
+    print(f"Firewall Status           : {summary.get('firewall_reliability')}")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
