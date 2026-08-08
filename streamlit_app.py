@@ -584,3 +584,4 @@ with col_foot1:
     st.caption("Sentinel-RAG Architecture | IBM Data Prep Kit + IBM Granite + Celonis EMS")
 with col_foot2:
     st.markdown('<div style="text-align: right; font-size:0.8rem; color:#6c757d;">Powered by IBM Bob Orchestration & Antigravity Low-Latency Sidecar</div>', unsafe_allow_html=True)
+

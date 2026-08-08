@@ -115,7 +115,7 @@ def run_sentinel_rag_demo():
             print(f"\n🚨 [CIRCUIT BREAKER TRIPPED MID-STREAM!]")
             print(f"   Reason: Uncertainty ({res['uncertainty_score']}) > Threshold tau (0.65)")
             print(f"   Action: Connection severed at token '{res['token']}' before hallucination reached user.")
-            print(f"   Fallback: Rerouting query to watsonx Agentic Fallback Handler.\n")
+            print(f"   Fallback: Rerouting query to Agentic Fallback Handler.\n")
 
 if __name__ == "__main__":
     run_sentinel_rag_demo()
