@@ -99,6 +99,54 @@ class EntropyEngine:
         self.tau = float(sorted_scores[min(idx, len(sorted_scores) - 1)])
         return self.tau
 
+    def generate_recovery_context(
+        self,
+        query: str,
+        halted_token: str,
+        context_history: List[str],
+        uncertainty_score: float,
+        rolling_variance: float
+    ) -> Dict[str, Any]:
+        """
+        Phase 3 Autonomous Recovery: Formulates a structured context repair package
+        for the watsonx Self-Healing Agent when a circuit-breaker trip occurs.
+        """
+        partial_output = " ".join(context_history)
+        suggested_search_terms = [t for t in query.split() if len(t) > 3 and not t.isdigit()]
+        
+        recovery_prompt = (
+            f"SYSTEM: The previous generation was intercepted due to an intra-generation semantic entropy breach "
+            f"(Uncertainty={uncertainty_score:.3f} > tau={self.tau:.2f}, Variance={rolling_variance:.3f}).\n"
+            f"INTERCEPTED TOKEN: '{halted_token}'\n"
+            f"ORIGINAL QUERY: '{query}'\n"
+            f"VERIFIED PARTIAL CONTEXT: '{partial_output}'\n"
+            f"DIRECTIVE: Execute vector similarity search in Milvus for '{' '.join(suggested_search_terms)}', "
+            f"retrieve verified Celonis SLA ground truth, and formulate the factual ground-truth answer."
+        )
+
+        return {
+            "query": query,
+            "halted_token": halted_token,
+            "uncertainty_score": round(uncertainty_score, 4),
+            "rolling_variance": round(rolling_variance, 4),
+            "tau_threshold": self.tau,
+            "partial_context": partial_output,
+            "suggested_query_terms": suggested_search_terms,
+            "self_healing_prompt": recovery_prompt,
+            "fallback_strategy": "vector_rerank_milvus"
+        }
+
+    def get_metrics_snapshot(self) -> Dict[str, Any]:
+        """Returns instantaneous snapshot of current entropy analytics state."""
+        current_variance = float(statistics.pvariance(self.history)) if len(self.history) >= 2 else 0.0
+        return {
+            "tau_threshold": self.tau,
+            "window_size": self.window_size,
+            "history_depth": len(self.history),
+            "current_variance": round(current_variance, 4),
+            "recent_probabilities": [round(p, 4) for p in self.history]
+        }
+
     def reset(self):
         """Reset sliding window state for a new streaming session."""
         self.history.clear()
