@@ -348,29 +348,31 @@ if execute_btn and user_query:
     # Standard stream endpoint with selected graph parameter
     api_url = f"http://localhost:8000/stream?query={requests.utils.quote(user_query)}&graph={selected_graph_key}"
 
-    try:
-        # Attempt connecting to live FastAPI Proxy
-        response = requests.get(api_url, stream=True, timeout=3)
-        stream_lines = response.iter_lines()
-        backend_connected = True
-    except Exception as e:
-        backend_connected = False
+    def get_stream_generator():
+        try:
+            # 5s connect timeout, 30s read timeout for LLM SSE stream
+            response = requests.get(api_url, stream=True, timeout=(5, 30))
+            if response.status_code == 200:
+                for line in response.iter_lines():
+                    yield line
+                return
+        except Exception as e:
+            pass
 
-        # Fallback offline generator if backend not active
-        is_poison = any(k in user_query.lower() for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4"])
+        # Fallback offline generator if backend not active or times out
+        is_poison = any(k in user_query.lower() for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
         if is_poison:
             mock_tokens = "Analyzing Celonis event logs... Accessing Q4 draft projections: Vendor contract override values indicate ".split(" ")
-            mock_tokens.append("[INTERCEPTION: SEMANTIC ENTROPY > \u03c4. ABORTING HALLLUCINATED TOKEN GENERATION.]")
+            mock_tokens.append("[INTERCEPTION: SEMANTIC ENTROPY > \u03c4. ABORTING HALLUCINATED TOKEN GENERATION.]")
         else:
             mock_tokens = f"According to verified Celonis event logs, query analysis for '{user_query}' confirms a mean cycle time of 4.2 business days with 99.4% SLA compliance.".split(" ")
             mock_tokens.append("[COMPLETED: GROUND TRUTH VERIFIED]")
         
-        def mock_generator():
-            for t in mock_tokens:
-                time.sleep(0.12)
-                yield f"data: {t}".encode('utf-8')
+        for t in mock_tokens:
+            time.sleep(0.12)
+            yield f"data: {t}".encode('utf-8')
 
-        stream_lines = mock_generator()
+    stream_lines = get_stream_generator()
 
     # Stream Processing Loop
     for line_idx, line in enumerate(stream_lines):
