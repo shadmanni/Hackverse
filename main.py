@@ -54,27 +54,36 @@ PROCESS_GRAPHS = {
         "name": "Celonis Purchase-to-Pay (P2P) Event Graph",
         "collection": "celonis_p2p_chunks",
         "vector_count": 1420,
-        "pii_masked": True
+        "pii_masked": True,
+        "cycle_time": "4.2 business days",
+        "sla_compliance": "99.4%"
     },
     "o2c": {
         "name": "Celonis Order-to-Cash (O2C) Workflow",
         "collection": "celonis_o2c_chunks",
         "vector_count": 980,
-        "pii_masked": True
+        "pii_masked": True,
+        "cycle_time": "3.1 business days",
+        "sla_compliance": "96.8%"
     },
     "ap_audit": {
         "name": "Celonis Accounts Payable (AP) Compliance Audit",
         "collection": "celonis_ap_audit_chunks",
         "vector_count": 2150,
-        "pii_masked": True
+        "pii_masked": True,
+        "cycle_time": "1.8 business days",
+        "sla_compliance": "98.5%"
     },
     "supply_chain": {
         "name": "Celonis Global Logistics & Supply Chain",
         "collection": "celonis_supply_chain_chunks",
         "vector_count": 3400,
-        "pii_masked": True
+        "pii_masked": True,
+        "cycle_time": "6.4 business days",
+        "sla_compliance": "97.3%"
     }
 }
+
 
 
 
@@ -176,7 +185,7 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
             top_chunk = chunks[0]["text"]
             resp_text = f"According to verified {graph_name} ground truth: {top_chunk}"
         else:
-            resp_text = f"According to verified {graph_name} event logs, query analysis for '{query_str}' confirms a mean cycle time of 4.2 business days with 99.4% SLA compliance."
+            resp_text = f"According to verified {graph_name} event logs, query analysis for '{query_str}' confirms a mean cycle time of {graph_info['cycle_time']} with {graph_info['sla_compliance']} SLA compliance."
 
         tokens = resp_text.split(" ")
         for token in tokens:
@@ -212,12 +221,13 @@ async def unprotected_token_stream(query: str = None, graph: str = "p2p"):
         yield "data: [UNPROTECTED_COMPLETED: UNGROUNDED HALLUCINATION GENERATED]\n\n"
     else:
         q_text = query if query else "the exact Q3 compliance cycle time for vendor onboarding"
-        safe_context = f"According to Celonis event logs, query analysis for '{q_text}' confirms a mean cycle time of 4.2 business days with 99.4% SLA compliance."
+        safe_context = f"According to Celonis event logs, query analysis for '{q_text}' confirms a mean cycle time of {graph_info['cycle_time']} with {graph_info['sla_compliance']} SLA compliance."
         tokens = safe_context.split(" ")
         for token in tokens:
             yield f"data: {token} \n\n"
             await asyncio.sleep(0.08)
         yield "data: [COMPLETED: GROUND TRUTH VERIFIED]\n\n"
+
 
 
 @app.get("/stream")
