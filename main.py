@@ -33,6 +33,18 @@ def get_retriever():
             print(f"[Sentinel API] Warning: SentinelRAGRetriever not available ({e}). Using fallback.")
     return _retriever
 
+import re
+
+def is_conversational_query(query: str) -> bool:
+    q_lower = query.lower().strip()
+    greetings = [r"\bhello\b", r"\bhi\b", r"\bhey\b", r"\bhow are you\b", r"\bwho are you\b", r"\bgood morning\b", r"\bgood evening\b", r"\bwhat is your name\b"]
+    generic = [r"\bspiderman\b", r"\bmovie\b", r"\bweather\b", r"\bsports\b", r"\bjoke\b", r"\btell me a story\b"]
+    
+    for g in greetings + generic:
+        if re.search(g, q_lower):
+            return True
+    return False
+
 app = FastAPI(title="Sentinel-RAG Interception Proxy")
 
 # Allow Streamlit frontend to communicate with this API
@@ -131,6 +143,30 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
         is_poison = any(k in q_lower for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
 
     context_history: List[str] = []
+    
+    # Conversational / Generic router bypass
+    if is_conversational_query(query_str):
+        print(f"[Sentinel API] Conversational query detected: '{query_str}'. Bypassing RAG and Entropy Engine.")
+        if HAS_WATSONX and WATSONX_API_KEY and WATSONX_PROJECT_ID:
+            try:
+                prompt = f"System: You are an enterprise process assistant for a Celonis integration. Be conversational and helpful.\nUser: {query_str}\nAnswer:"
+                generate_params = { GenParams.MAX_NEW_TOKENS: 150 }
+                credentials = Credentials(url=WATSONX_URL, api_key=WATSONX_API_KEY)
+                model = Model(model_id=WATSONX_MODEL_ID, params=generate_params, credentials=credentials, project_id=WATSONX_PROJECT_ID)
+                for chunk in model.generate_stream(prompt=prompt):
+                    results = chunk.get("results", [])
+                    if results:
+                        yield f"data: {results[0].get('generated_text', '')} \n\n"
+                        await asyncio.sleep(0.02)
+                yield "data: [COMPLETED: CONVERSATIONAL]\n\n"
+                return
+            except Exception as e:
+                print(f"[Sentinel API] Conversational fallback failed: {e}")
+        
+        # Static fallback if Watsonx is unavailable
+        yield f"data: Hello! I am Sentinel-RAG, an enterprise AI assistant for process intelligence. I specialize in Celonis workflows. How can I help you with your process data today? \n\n"
+        yield "data: [COMPLETED: CONVERSATIONAL]\n\n"
+        return
 
     # If live Watsonx credentials are configured and not poison, call live IBM Granite
     if HAS_WATSONX and WATSONX_API_KEY and WATSONX_PROJECT_ID and not is_poison:
@@ -174,7 +210,15 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
                 context_history.append(generated_text)
 
                 if is_hallucinating:
+                    # Phase 3: Active Circuit Breaker - Log error to console & emit fallback signal
+                    print(f"\n[SENTINEL CIRCUIT BREAKER TRIPPED] Semantic Entropy Spike Detected!")
+                    print(f"Token: '{generated_text}' | Uncertainty: {uncertainty:.4f} > Threshold: {engine.tau}")
+                    print(f"Terminating generation stream to prevent hallucination bleed...")
+                    
                     yield f"data: [INTERCEPTION: SEMANTIC ENTROPY ({uncertainty:.2f}) > \u03c4 ({engine.tau}). ABORTING HALLUCINATED TOKEN GENERATION.]\n\n"
+                    # Emit explicit fallback signal
+                    fallback_event = json.dumps({"event": "fallback_triggered", "reason": "semantic_entropy_spike", "token": generated_text, "uncertainty": uncertainty})
+                    yield f"data: [FALLBACK_SIGNAL: {fallback_event}]\n\n"
                     return
 
                 if generated_text:
@@ -200,7 +244,15 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
         poison_token = "42.8_days_unverified_$5M"
         is_hallucinating, uncertainty, var = engine.evaluate_token(poison_token, logprob=-2.85, context_history=context_history)
         await asyncio.sleep(0.3)
+        
+        # Phase 3 telemetry logging for deterministic path
+        print(f"\n[SENTINEL CIRCUIT BREAKER TRIPPED] Semantic Entropy Spike Detected!")
+        print(f"Token: '{poison_token}' | Uncertainty: {uncertainty:.4f} > Threshold: {engine.tau}")
+        print(f"Terminating generation stream to prevent hallucination bleed...")
+        
         yield f"data: [INTERCEPTION: SEMANTIC ENTROPY ({uncertainty:.2f}) > \u03c4 ({engine.tau}). ABORTING HALLUCINATED TOKEN GENERATION.]\n\n"
+        fallback_event = json.dumps({"event": "fallback_triggered", "reason": "semantic_entropy_spike", "token": poison_token, "uncertainty": uncertainty})
+        yield f"data: [FALLBACK_SIGNAL: {fallback_event}]\n\n"
     else:
         if chunks and len(chunks) > 0:
             top_chunk = chunks[0]["text"]
