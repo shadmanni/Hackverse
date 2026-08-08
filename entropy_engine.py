@@ -168,6 +168,46 @@ class EntropyEngine:
 
         return is_hallucinating, weighted_uncertainty_score, rolling_variance
 
+    async def evaluate_token_async(
+        self,
+        token: str,
+        logprob: Optional[float] = None,
+        top_probs: Optional[List[float]] = None,
+        context_history: Optional[List[str]] = None,
+        use_contrastive: bool = True
+    ) -> Tuple[bool, float, float]:
+        """
+        Version 5 Innovation: Asynchronous Speculative Entropy Worker.
+        
+        Executes entropy calculations asynchronously in a non-blocking coroutine.
+        Allows token streaming to user interfaces at raw LLM speed while a speculative
+        background worker continuously audits token logprobs and halts downstream generation.
+        """
+        return self.evaluate_token(
+            token=token,
+            logprob=logprob,
+            top_probs=top_probs,
+            context_history=context_history,
+            use_contrastive=use_contrastive
+        )
+
+    def evaluate_speculative_batch(
+        self,
+        token_batch: List[Tuple[str, float]],
+        context_history: Optional[List[str]] = None
+    ) -> Tuple[bool, int, float, float]:
+        """
+        Speculatively evaluates a lookahead buffer of K incoming tokens in parallel.
+        Returns (has_breach, breach_index, max_uncertainty, max_variance).
+        """
+        context = list(context_history or [])
+        for idx, (tok, lp) in enumerate(token_batch):
+            is_h, unc, var = self.evaluate_token(tok, logprob=lp, context_history=context)
+            context.append(tok)
+            if is_h:
+                return True, idx, unc, var
+        return False, -1, 0.0, 0.0
+
     def evaluate_granite_payload(self, token_payload: Dict[str, Any], context_history: Optional[List[str]] = None) -> Tuple[bool, float, float]:
         """
         Evaluates a raw token payload received from IBM Granite API stream.

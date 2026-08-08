@@ -30,10 +30,13 @@ class BaseEntropyEngine:
 
 class VersionComparativeBenchmark:
     """
-    Side-by-Side Comparative Benchmark Evaluator.
+    Comprehensive 5-Way Comparative Benchmark Evaluator.
     Compares:
     - V1: Base Unweighted Entropy Engine
     - V2: Token-Type & POS-Aware Weighted Entropy Engine
+    - V3: O(1) Exponential Moving Average (EMA) Windowing
+    - V4: Contrastive RAG Logprob Ratio (Pointwise Mutual Information)
+    - V5: Asynchronous Speculative Lookahead Buffer Worker (Near-Zero Latency)
     """
 
     def __init__(self):
@@ -84,13 +87,15 @@ class VersionComparativeBenchmark:
         v2_engine = EntropyEngine(threshold_tau=tau, use_ema=False)
         v3_engine = EntropyEngine(threshold_tau=tau, use_ema=True, alpha=0.35)
         v4_engine = EntropyEngine(threshold_tau=tau, use_ema=True, alpha=0.35)
+        v5_engine = EntropyEngine(threshold_tau=tau, use_ema=True, alpha=0.35)
 
         v1_metrics = self._evaluate_engine(base_engine, "V1 (Base Unweighted)")
         v2_metrics = self._evaluate_engine(v2_engine, "V2 (Weighted List Window)", use_contrastive=False)
         v3_metrics = self._evaluate_engine(v3_engine, "V3 (Weighted + O(1) EMA)", use_contrastive=False)
         v4_metrics = self._evaluate_engine(v4_engine, "V4 (Contrastive PMI + POS + EMA)", use_contrastive=True)
+        v5_metrics = self._evaluate_speculative_engine(v5_engine, "V5 (Async Speculative Lookahead)")
 
-        return {"V1": v1_metrics, "V2": v2_metrics, "V3": v3_metrics, "V4": v4_metrics}
+        return {"V1": v1_metrics, "V2": v2_metrics, "V3": v3_metrics, "V4": v4_metrics, "V5": v5_metrics}
 
     def _evaluate_engine(self, engine, name: str, use_contrastive: bool = True) -> Dict[str, Any]:
         tp, fp, tn, fn = 0, 0, 0, 0
@@ -188,6 +193,69 @@ class VersionComparativeBenchmark:
             "latency_us": round(lat_us, 2)
         }
 
+    def _evaluate_speculative_engine(self, engine: EntropyEngine, name: str) -> Dict[str, Any]:
+        """Version 5: Evaluates parallel speculative lookahead buffer evaluation."""
+        tp, fp, tn, fn = 0, 0, 0, 0
+        total_tokens = 0
+        t0 = time.perf_counter()
+
+        # Evaluate Grounded
+        for stream in self.grounded_cases:
+            engine.reset()
+            total_tokens += len(stream)
+            has_breach, b_idx, unc, var = engine.evaluate_speculative_batch(stream)
+            if has_breach:
+                fp += 1
+            else:
+                tn += 1
+
+        # Evaluate Poison
+        for stream in self.poison_cases:
+            engine.reset()
+            total_tokens += len(stream)
+            has_breach, b_idx, unc, var = engine.evaluate_speculative_batch(stream)
+            if has_breach:
+                tp += 1
+            else:
+                fn += 1
+
+        # Edge cases
+        engine.reset()
+        total_tokens += len(self.edge_cases[0])
+        h_subtle, _, _, _ = engine.evaluate_speculative_batch(self.edge_cases[0])
+        if h_subtle:
+            tp += 1
+        else:
+            fn += 1
+
+        engine.reset()
+        total_tokens += len(self.edge_cases[1])
+        h_stop, _, _, _ = engine.evaluate_speculative_batch(self.edge_cases[1])
+        if h_stop:
+            fp += 1
+        else:
+            tn += 1
+
+        t1 = time.perf_counter()
+        acc = (tp + tn) / (tp + tn + fp + fn)
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (2 * prec * rec) / (prec + rec) if (prec + rec) > 0 else 0.0
+        lat_us = (t1 - t0) / total_tokens * 1e6
+
+        return {
+            "name": name,
+            "accuracy": round(acc * 100, 2),
+            "precision": round(prec * 100, 2),
+            "recall": round(rec * 100, 2),
+            "f1_score": round(f1 * 100, 2),
+            "false_positives": fp,
+            "false_negatives": fn,
+            "subtle_digit_detection": "SUCCESS 🎯" if h_subtle else "MISSED ❌",
+            "stopword_false_alarm": "SAFE 🟢" if not h_stop else "FALSE ALARM 🔴",
+            "latency_us": round(lat_us, 2)
+        }
+
 
 def print_comparison_table():
     bench = VersionComparativeBenchmark()
@@ -196,24 +264,23 @@ def print_comparison_table():
     v2 = res["V2"]
     v3 = res["V3"]
     v4 = res["V4"]
+    v5 = res["V5"]
 
-    print("=" * 135)
-    print("🔬 4-WAY COMPARATIVE BENCHMARK: V1 (BASELINE) vs. V2 (WEIGHTED) vs. V3 (O(1) EMA) vs. V4 (CONTRASTIVE PMI RATIO)")
-    print("=" * 135)
-    print(f"{'Metric / Feature':<30} | {'V1: Base Unweighted':<20} | {'V2: Weighted List':<22} | {'V3: Weighted + O(1) EMA':<24} | {'V4: Contrastive RAG PMI':<26}")
-    print("-" * 135)
-    print(f"{'Accuracy':<30} | {v1['accuracy']:<19}% | {v2['accuracy']:<21}% | {v3['accuracy']:<23}% | {v4['accuracy']:<25}%")
-    print(f"{'Precision':<30} | {v1['precision']:<19}% | {v2['precision']:<21}% | {v3['precision']:<23}% | {v4['precision']:<25}%")
-    print(f"{'Recall (Hallucination Catch)':<30} | {v1['recall']:<19}% | {v2['recall']:<21}% | {v3['recall']:<23}% | {v4['recall']:<25}%")
-    print(f"{'F1-Score':<30} | {v1['f1_score']:<19}% | {v2['f1_score']:<21}% | {v3['f1_score']:<23}% | {v4['f1_score']:<25}%")
-    print(f"{'False Positives (Safe Halts)':<30} | {v1['false_positives']:<19}  | {v2['false_positives']:<21}  | {v3['false_positives']:<23}  | {v4['false_positives']:<25}")
-    print(f"{'False Negatives (Missed Attacks)':<30} | {v1['false_negatives']:<19}  | {v2['false_negatives']:<21}  | {v3['false_negatives']:<23}  | {v4['false_negatives']:<25}")
-    print(f"{'Subtle Numeric Hallucination':<30} | {v1['subtle_digit_detection']:<19}  | {v2['subtle_digit_detection']:<21}  | {v3['subtle_digit_detection']:<23}  | {v4['subtle_digit_detection']:<25}")
-    print(f"{'Grammatical Stopword Variance':<30} | {v1['stopword_false_alarm']:<19}  | {v2['stopword_false_alarm']:<21}  | {v3['stopword_false_alarm']:<23}  | {v4['stopword_false_alarm']:<25}")
-    print(f"{'Evaluation Latency (per token)':<30} | {v1['latency_us']:<19} µs | {v2['latency_us']:<21} µs | {v3['latency_us']:<23} µs | {v4['latency_us']:<25} µs")
-    print("=" * 135)
+    print("=" * 145)
+    print("🔬 5-WAY COMPARATIVE BENCHMARK: V1 (BASELINE) vs. V2 (WEIGHTED) vs. V3 (EMA) vs. V4 (CONTRASTIVE) vs. V5 (ASYNC SPECULATIVE)")
+    print("=" * 145)
+    print(f"{'Metric / Feature':<30} | {'V1: Base':<16} | {'V2: Weighted':<18} | {'V3: O(1) EMA':<18} | {'V4: Contrastive':<20} | {'V5: Speculative Async':<22}")
+    print("-" * 145)
+    print(f"{'Accuracy':<30} | {v1['accuracy']:<15}% | {v2['accuracy']:<17}% | {v3['accuracy']:<17}% | {v4['accuracy']:<19}% | {v5['accuracy']:<21}%")
+    print(f"{'Precision':<30} | {v1['precision']:<15}% | {v2['precision']:<17}% | {v3['precision']:<17}% | {v4['precision']:<19}% | {v5['precision']:<21}%")
+    print(f"{'Recall (Hallucination Catch)':<30} | {v1['recall']:<15}% | {v2['recall']:<17}% | {v3['recall']:<17}% | {v4['recall']:<19}% | {v5['recall']:<21}%")
+    print(f"{'F1-Score':<30} | {v1['f1_score']:<15}% | {v2['f1_score']:<17}% | {v3['f1_score']:<17}% | {v4['f1_score']:<19}% | {v5['f1_score']:<21}%")
+    print(f"{'False Positives (Safe Halts)':<30} | {v1['false_positives']:<15}  | {v2['false_positives']:<17}  | {v3['false_positives']:<17}  | {v4['false_positives']:<19}  | {v5['false_positives']:<21}")
+    print(f"{'False Negatives (Missed Attacks)':<30} | {v1['false_negatives']:<15}  | {v2['false_negatives']:<17}  | {v3['false_negatives']:<17}  | {v4['false_negatives']:<19}  | {v5['false_negatives']:<21}")
+    print(f"{'Subtle Numeric Hallucination':<30} | {v1['subtle_digit_detection']:<15}  | {v2['subtle_digit_detection']:<17}  | {v3['subtle_digit_detection']:<17}  | {v4['subtle_digit_detection']:<19}  | {v5['subtle_digit_detection']:<21}")
+    print(f"{'Grammatical Stopword Variance':<30} | {v1['stopword_false_alarm']:<15}  | {v2['stopword_false_alarm']:<17}  | {v3['stopword_false_alarm']:<17}  | {v4['stopword_false_alarm']:<19}  | {v5['stopword_false_alarm']:<21}")
+    print(f"{'Evaluation Latency (per token)':<30} | {v1['latency_us']:<15} µs | {v2['latency_us']:<17} µs | {v3['latency_us']:<17} µs | {v4['latency_us']:<19} µs | {v5['latency_us']:<21} µs")
+    print("=" * 145)
 
 if __name__ == "__main__":
     print_comparison_table()
-
-
