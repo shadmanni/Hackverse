@@ -119,9 +119,9 @@ class EntropyEngine:
         pmi_penalty = max(0.0, -contrastive_ratio)
         return float(pmi_penalty)
 
-    def evaluate_token(self, token: str, logprob: Optional[float] = None, top_probs: Optional[List[float]] = None, context_history: Optional[List[str]] = None, use_contrastive: bool = True) -> Tuple[bool, float, float]:
+    def evaluate_token(self, token: str, logprob: Optional[float] = None, top_probs: Optional[List[float]] = None, context_history: Optional[List[str]] = None, use_contrastive: bool = False) -> Tuple[bool, float, float]:
         """
-        Evaluates an incoming token during decoding using Version 4/5 Contrastive RAG Logprob Ratio + POS Weighting + O(1) EMA.
+        Evaluates an incoming token during decoding using Version 3 POS Weighting + O(1) EMA Welford Incremental Variance.
         """
         if logprob is None:
             logprob = self.draft_extractor.estimate_draft_logprob(context_history or [], token)
