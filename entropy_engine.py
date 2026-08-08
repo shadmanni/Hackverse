@@ -13,15 +13,24 @@ class EntropyEngine:
     3. Dynamic threshold calibration (tau) to trip the circuit breaker.
     """
 
-    def __init__(self, threshold_tau: float = 0.65, window_size: int = 5):
+    def __init__(self, threshold_tau: float = 0.65, window_size: int = 5, use_ema: bool = True, alpha: float = 0.35):
         """
         :param threshold_tau: The entropy/variance threshold above which a hallucination is flagged.
         :param window_size: Number of previous tokens to consider for rolling variance.
+        :param use_ema: Whether to use O(1) Exponential Moving Average (EMA) variance windowing.
+        :param alpha: Smoothing factor for EMA (default 0.35).
         """
         self.tau = threshold_tau
         self.window_size = window_size
+        self.use_ema = use_ema
+        self.alpha = alpha
         self.history: List[float] = []
         self.draft_extractor = DraftLogprobExtractor()
+        
+        # Version 3: O(1) Exponential Moving Average (EMA) State Variables
+        self.ema_mean: float = 0.0
+        self.ema_var: float = 0.0
+        self.count: int = 0
 
     def compute_shannon_entropy(self, probabilities: List[float]) -> float:
         """
@@ -108,8 +117,19 @@ class EntropyEngine:
             # Fallback estimation based on single token prob
             shannon_h = - (prob * math.log2(prob) if prob > 0 else 0.0)
 
-        # 2. Calculate rolling variance over the sliding window
-        rolling_variance = float(statistics.pvariance(self.history)) if len(self.history) >= 2 else 0.0
+        # 2. Calculate rolling variance: Version 3 uses O(1) Exponential Moving Average (EMA)
+        self.count += 1
+        if self.use_ema:
+            if self.count == 1:
+                self.ema_mean = prob
+                self.ema_var = 0.0
+            else:
+                delta = prob - self.ema_mean
+                self.ema_mean += self.alpha * delta
+                self.ema_var = (1 - self.alpha) * (self.ema_var + self.alpha * (delta ** 2))
+            rolling_variance = float(self.ema_var)
+        else:
+            rolling_variance = float(statistics.pvariance(self.history)) if len(self.history) >= 2 else 0.0
 
         # 3. Dynamic POS & Entity Weighting
         token_weight = self.get_token_type_weight(token)

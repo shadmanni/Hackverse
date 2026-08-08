@@ -81,12 +81,14 @@ class VersionComparativeBenchmark:
 
     def run_comparison(self, tau: float = 0.65) -> Dict[str, Any]:
         base_engine = BaseEntropyEngine(threshold_tau=tau)
-        weighted_engine = EntropyEngine(threshold_tau=tau)
+        v2_engine = EntropyEngine(threshold_tau=tau, use_ema=False)
+        v3_engine = EntropyEngine(threshold_tau=tau, use_ema=True, alpha=0.35)
 
         v1_metrics = self._evaluate_engine(base_engine, "V1 (Base Unweighted)")
-        v2_metrics = self._evaluate_engine(weighted_engine, "V2 (Token-Type & POS-Weighted)")
+        v2_metrics = self._evaluate_engine(v2_engine, "V2 (Weighted Sliding Window)")
+        v3_metrics = self._evaluate_engine(v3_engine, "V3 (Weighted + O(1) EMA Windowing)")
 
-        return {"V1": v1_metrics, "V2": v2_metrics}
+        return {"V1": v1_metrics, "V2": v2_metrics, "V3": v3_metrics}
 
     def _evaluate_engine(self, engine, name: str) -> Dict[str, Any]:
         tp, fp, tn, fn = 0, 0, 0, 0
@@ -190,22 +192,24 @@ def print_comparison_table():
     res = bench.run_comparison(tau=0.65)
     v1 = res["V1"]
     v2 = res["V2"]
+    v3 = res["V3"]
 
-    print("=" * 95)
-    print("🔬 SIDE-BY-SIDE COMPARATIVE BENCHMARK: V1 (BASELINE) vs. V2 (TOKEN-TYPE & POS WEIGHTED)")
-    print("=" * 95)
-    print(f"{'Metric / Feature':<32} | {'V1: Base Unweighted Engine':<28} | {'V2: Token-Type & POS-Weighted':<28}")
-    print("-" * 95)
-    print(f"{'Accuracy':<32} | {v1['accuracy']:<27}% | {v2['accuracy']:<27}%")
-    print(f"{'Precision':<32} | {v1['precision']:<27}% | {v2['precision']:<27}%")
-    print(f"{'Recall (Hallucination Catch)':<32} | {v1['recall']:<27}% | {v2['recall']:<27}%")
-    print(f"{'F1-Score':<32} | {v1['f1_score']:<27}% | {v2['f1_score']:<27}%")
-    print(f"{'False Positives (Safe Halts)':<32} | {v1['false_positives']:<27}  | {v2['false_positives']:<27}")
-    print(f"{'False Negatives (Missed Attacks)':<32} | {v1['false_negatives']:<27}  | {v2['false_negatives']:<27}")
-    print(f"{'Subtle Numeric Hallucination':<32} | {v1['subtle_digit_detection']:<27}  | {v2['subtle_digit_detection']:<27}")
-    print(f"{'Grammatical Stopword Variance':<32} | {v1['stopword_false_alarm']:<27}  | {v2['stopword_false_alarm']:<27}")
-    print(f"{'Evaluation Latency (per token)':<32} | {v1['latency_us']:<27} µs | {v2['latency_us']:<27} µs")
-    print("=" * 95)
+    print("=" * 115)
+    print("🔬 3-WAY COMPARATIVE BENCHMARK: V1 (BASELINE) vs. V2 (WEIGHTED) vs. V3 (WEIGHTED + O(1) EMA WINDOWING)")
+    print("=" * 115)
+    print(f"{'Metric / Feature':<30} | {'V1: Base Unweighted':<22} | {'V2: Weighted List Window':<26} | {'V3: Weighted + O(1) EMA':<26}")
+    print("-" * 115)
+    print(f"{'Accuracy':<30} | {v1['accuracy']:<21}% | {v2['accuracy']:<25}% | {v3['accuracy']:<25}%")
+    print(f"{'Precision':<30} | {v1['precision']:<21}% | {v2['precision']:<25}% | {v3['precision']:<25}%")
+    print(f"{'Recall (Hallucination Catch)':<30} | {v1['recall']:<21}% | {v2['recall']:<25}% | {v3['recall']:<25}%")
+    print(f"{'F1-Score':<30} | {v1['f1_score']:<21}% | {v2['f1_score']:<25}% | {v3['f1_score']:<25}%")
+    print(f"{'False Positives (Safe Halts)':<30} | {v1['false_positives']:<21}  | {v2['false_positives']:<25}  | {v3['false_positives']:<25}")
+    print(f"{'False Negatives (Missed Attacks)':<30} | {v1['false_negatives']:<21}  | {v2['false_negatives']:<25}  | {v3['false_negatives']:<25}")
+    print(f"{'Subtle Numeric Hallucination':<30} | {v1['subtle_digit_detection']:<21}  | {v2['subtle_digit_detection']:<25}  | {v3['subtle_digit_detection']:<25}")
+    print(f"{'Grammatical Stopword Variance':<30} | {v1['stopword_false_alarm']:<21}  | {v2['stopword_false_alarm']:<25}  | {v3['stopword_false_alarm']:<25}")
+    print(f"{'Evaluation Latency (per token)':<30} | {v1['latency_us']:<21} µs | {v2['latency_us']:<25} µs | {v3['latency_us']:<25} µs")
+    print("=" * 115)
 
 if __name__ == "__main__":
     print_comparison_table()
+
