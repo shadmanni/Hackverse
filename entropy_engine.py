@@ -32,6 +32,12 @@ class EntropyEngine:
         self.ema_var: float = 0.0
         self.count: int = 0
 
+    STOPWORDS = {
+        "the", "a", "an", "is", "are", "was", "were", "to", "of", "in", "for", 
+        "on", "with", "at", "by", "from", "up", "about", "into", "over", "after",
+        "and", "or", "but", "if", "that", "this", "these", "those", "it", "its"
+    }
+
     def compute_shannon_entropy(self, probabilities: List[float]) -> float:
         """
         Calculates Shannon Entropy H(P) = - sum(p * log2(p)) for a probability distribution.
@@ -46,9 +52,11 @@ class EntropyEngine:
         """
         Computes the variance V(y_t) over a sequence of log probabilities.
         """
-        if len(logprobs) < 2:
+        n = len(logprobs)
+        if n < 2:
             return 0.0
-        return float(statistics.pvariance(logprobs))
+        mean = sum(logprobs) / n
+        return sum((x - mean) ** 2 for x in logprobs) / n
 
     def get_token_type_weight(self, token: str) -> float:
         """
@@ -66,24 +74,29 @@ class EntropyEngine:
             return 0.5
 
         # 1. Critical: Financial, currency, digits, and quantitative claims
-        if any(char.isdigit() for char in clean) or any(c in clean for c in ["$", "€", "£", "%"]):
+        # 1. Critical: Financial, currency, digits, and quantitative claims
+        has_digit_or_symbol = False
+        symbols = {"$", "€", "£", "%"}
+        for char in clean:
+            if char.isdigit() or char in symbols:
+                has_digit_or_symbol = True
+                break
+        if has_digit_or_symbol:
             return 3.2
 
         # 2. Critical: Specialized code / process identifiers (e.g. CASE-10231, CC-4471, W-99)
-        if "-" in clean and any(part.isupper() for part in clean.split("-")):
-            return 2.8
+        if "-" in clean:
+            for part in clean.split("-"):
+                if part.isupper():
+                    return 2.8
+                    break
 
         # 3. High: Capitalized Enterprise Named Entities / Proper Nouns
         if clean[0].isupper() and len(clean) > 2 and not clean.endswith("."):
             return 1.8
 
         # 4. Low: Common grammatical stopwords / glue tokens
-        stopwords = {
-            "the", "a", "an", "is", "are", "was", "were", "to", "of", "in", "for", 
-            "on", "with", "at", "by", "from", "up", "about", "into", "over", "after",
-            "and", "or", "but", "if", "that", "this", "these", "those", "it", "its"
-        }
-        if clean.lower() in stopwords:
+        if clean.lower() in self.STOPWORDS:
             return 0.45
 
         # 5. Baseline for general vocabulary
@@ -150,7 +163,12 @@ class EntropyEngine:
                 self.ema_var = (1 - self.alpha) * (self.ema_var + self.alpha * (delta ** 2))
             rolling_variance = float(self.ema_var)
         else:
-            rolling_variance = float(statistics.pvariance(self.history)) if len(self.history) >= 2 else 0.0
+            n = len(self.history)
+            if n < 2:
+                rolling_variance = 0.0
+            else:
+                mean = sum(self.history) / n
+                rolling_variance = sum((x - mean) ** 2 for x in self.history) / n
 
         # 3. Dynamic POS & Entity Weighting
         token_weight = self.get_token_type_weight(token)
@@ -266,7 +284,12 @@ class EntropyEngine:
 
     def get_metrics_snapshot(self) -> Dict[str, Any]:
         """Returns instantaneous snapshot of current entropy analytics state."""
-        current_variance = float(statistics.pvariance(self.history)) if len(self.history) >= 2 else 0.0
+        n = len(self.history)
+        if n < 2:
+            current_variance = 0.0
+        else:
+            mean = sum(self.history) / n
+            current_variance = sum((x - mean) ** 2 for x in self.history) / n
         return {
             "tau_threshold": self.tau,
             "window_size": self.window_size,
