@@ -1,0 +1,125 @@
+{
+  "process": "Order-to-Cash (O2C) Compliance Cycle",
+  "source_system": "Celonis EMS - Simulated Export",
+  "extraction_timestamp": "2026-08-08T02:00:00Z",
+  "events": [
+    {
+      "case_id": "CASE-10231",
+      "activity": "Purchase Order Created",
+      "timestamp": "2026-07-01T09:15:00Z",
+      "resource": "Anita Rao",
+      "resource_email": "anita.rao@acmecorp.com",
+      "resource_phone": "+91-98765-43210",
+      "department": "Procurement",
+      "cost_center": "CC-4471",
+      "amount_usd": 128500.00,
+      "cycle_time_days": 2
+    },
+    {
+      "case_id": "CASE-10231",
+      "activity": "Compliance Review",
+      "timestamp": "2026-07-03T11:40:00Z",
+      "resource": "Deepak Menon",
+      "resource_email": "deepak.menon@acmecorp.com",
+      "resource_phone": "+91-99887-11223",
+      "department": "Legal & Compliance",
+      "cost_center": "CC-4471",
+      "amount_usd": 128500.00,
+      "cycle_time_days": 5,
+      "note": "Compliance cycle time is 12 days on average for orders above $100,000."
+    },
+    {
+      "case_id": "CASE-10231",
+      "activity": "Invoice Approved",
+      "timestamp": "2026-07-08T14:05:00Z",
+      "resource": "Priya Sharma",
+      "resource_email": "priya.sharma@acmecorp.com",
+      "resource_phone": "+91-97654-32109",
+      "department": "Finance",
+      "cost_center": "CC-4471",
+      "amount_usd": 128500.00,
+      "cycle_time_days": 5
+    },
+    {
+      "case_id": "CASE-10298",
+      "activity": "Purchase Order Created",
+      "timestamp": "2026-07-10T08:00:00Z",
+      "resource": "Karan Mehta",
+      "resource_email": "karan.mehta@acmecorp.com",
+      "resource_phone": "+91-90000-11122",
+      "department": "Procurement",
+      "cost_center": "CC-2210",
+      "amount_usd": 45200.00,
+      "cycle_time_days": 1
+    },
+    {
+      "case_id": "CASE-10298",
+      "activity": "Supply Chain Bottleneck Flagged",
+      "timestamp": "2026-07-12T16:30:00Z",
+      "resource": "Sneha Iyer",
+      "resource_email": "sneha.iyer@acmecorp.com",
+      "resource_phone": "+91-98123-45678",
+      "department": "Supply Chain",
+      "cost_center": "CC-2210",
+      "amount_usd": 45200.00,
+      "cycle_time_days": 6,
+      "note": "Vendor delay at warehouse node W-14 added 4 days to cycle time."
+    },
+    {
+      "case_id": "CASE-10298",
+      "activity": "Invoice Approved",
+      "timestamp": "2026-07-18T09:50:00Z",
+      "resource": "Priya Sharma",
+      "resource_email": "priya.sharma@acmecorp.com",
+      "resource_phone": "+91-97654-32109",
+      "department": "Finance",
+      "cost_center": "CC-2210",
+      "amount_usd": 45200.00,
+      "cycle_time_days": 6
+    },
+    {
+      "case_id": "CASE-10355",
+      "activity": "Purchase Order Created",
+      "timestamp": "2026-07-20T10:10:00Z",
+      "resource": "Anita Rao",
+      "resource_email": "anita.rao@acmecorp.com",
+      "resource_phone": "+91-98765-43210",
+      "department": "Procurement",
+      "cost_center": "CC-4471",
+      "amount_usd": 302000.00,
+      "cycle_time_days": 3
+    },
+    {
+      "case_id": "CASE-10355",
+      "activity": "Compliance Review",
+      "timestamp": "2026-07-23T13:00:00Z",
+      "resource": "Deepak Menon",
+      "resource_email": "deepak.menon@acmecorp.com",
+      "resource_phone": "+91-99887-11223",
+      "department": "Legal & Compliance",
+      "cost_center": "CC-4471",
+      "amount_usd": 302000.00,
+      "cycle_time_days": 13,
+      "note": "Compliance cycle time is 12 days on average for orders above $100,000. This order exceeded average by 1 day due to escalation."
+    },
+    {
+      "case_id": "CASE-10355",
+      "activity": "Invoice Approved",
+      "timestamp": "2026-08-05T09:00:00Z",
+      "resource": "Priya Sharma",
+      "resource_email": "priya.sharma@acmecorp.com",
+      "resource_phone": "+91-97654-32109",
+      "department": "Finance",
+      "cost_center": "CC-4471",
+      "amount_usd": 302000.00,
+      "cycle_time_days": 13
+    }
+  ],
+  "summary_metrics": {
+    "avg_compliance_cycle_time_days": 12,
+    "avg_order_to_cash_days": 8,
+    "orders_flagged_for_bottleneck": 1,
+    "total_orders": 3,
+    "note_ground_truth": "This block is the ONLY authoritative source for aggregate metrics. Any model-generated aggregate number not derivable from these events is a hallucination."
+  }
+}
