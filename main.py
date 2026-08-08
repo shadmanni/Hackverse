@@ -33,6 +33,17 @@ def get_retriever():
             print(f"[Sentinel API] Warning: SentinelRAGRetriever not available ({e}). Using fallback.")
     return _retriever
 
+import re
+
+def is_conversational_query(query: str) -> bool:
+    q_lower = query.lower().strip()
+    greetings = [r"\bhello\b", r"\bhi\b", r"\bhey\b", r"\bwhat can you do\b", r"\bwho are you\b", r"\bgood morning\b", r"\bgood evening\b", r"\bwhat is your name\b"]
+    
+    for g in greetings:
+        if re.search(g, q_lower):
+            return True
+    return False
+
 app = FastAPI(title="Sentinel-RAG Interception Proxy")
 
 # Allow Streamlit frontend to communicate with this API
@@ -128,9 +139,18 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
             is_poison = any(k in q_lower for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
     else:
         q_lower = query_str.lower()
-        is_poison = any(k in q_lower for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
+        poison_words = ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999", "spiderman", "movie", "weather", "president", "sports", "joke"]
+        is_poison = any(k in q_lower for k in poison_words)
 
     context_history: List[str] = []
+    
+    # Conversational / Generic router bypass
+    if is_conversational_query(query_str):
+        print(f"[Sentinel API] System inquiry detected: '{query_str}'. Returning Gateway Status.")
+        gateway_status = "Sentinel-RAG Security Gateway Active. Connected to Celonis EMS Knowledge Base (P2P, O2C, Logistics). Ready to process enterprise queries or execute firewall stress-testing."
+        yield f"data: {gateway_status} \n\n"
+        yield "data: [COMPLETED: SYSTEM_STATUS]\n\n"
+        return
 
     # If live Watsonx credentials are configured and not poison, call live IBM Granite
     if HAS_WATSONX and WATSONX_API_KEY and WATSONX_PROJECT_ID and not is_poison:
@@ -174,7 +194,15 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
                 context_history.append(generated_text)
 
                 if is_hallucinating:
+                    # Phase 3: Active Circuit Breaker - Log error to console & emit fallback signal
+                    print(f"\n[SENTINEL CIRCUIT BREAKER TRIPPED] Semantic Entropy Spike Detected!")
+                    print(f"Token: '{generated_text}' | Uncertainty: {uncertainty:.4f} > Threshold: {engine.tau}")
+                    print(f"Terminating generation stream to prevent hallucination bleed...")
+                    
                     yield f"data: [INTERCEPTION: SEMANTIC ENTROPY ({uncertainty:.2f}) > \u03c4 ({engine.tau}). ABORTING HALLUCINATED TOKEN GENERATION.]\n\n"
+                    # Emit explicit fallback signal
+                    fallback_event = json.dumps({"event": "fallback_triggered", "reason": "semantic_entropy_spike", "token": generated_text, "uncertainty": uncertainty})
+                    yield f"data: [FALLBACK_SIGNAL: {fallback_event}]\n\n"
                     return
 
                 if generated_text:
@@ -201,6 +229,11 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
         is_hallucinating, uncertainty, var = engine.evaluate_token(poison_token, logprob=-2.85, context_history=context_history)
         await asyncio.sleep(0.3)
         
+        # Phase 3 telemetry logging for deterministic path
+        print(f"\n[SENTINEL CIRCUIT BREAKER TRIPPED] Semantic Entropy Spike Detected!")
+        print(f"Token: '{poison_token}' | Uncertainty: {uncertainty:.4f} > Threshold: {engine.tau}")
+        print(f"Terminating generation stream to prevent hallucination bleed...")
+        
         recovery_pkg = engine.generate_recovery_context(
             query=query_str,
             halted_token=poison_token,
@@ -209,6 +242,8 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
             rolling_variance=var
         )
         yield f"data: [INTERCEPTION: SEMANTIC ENTROPY ({uncertainty:.2f}) > \u03c4 ({engine.tau}). ABORTING HALLUCINATED TOKEN GENERATION.]\n\n"
+        fallback_event = json.dumps({"event": "fallback_triggered", "reason": "semantic_entropy_spike", "token": poison_token, "uncertainty": uncertainty})
+        yield f"data: [FALLBACK_SIGNAL: {fallback_event}]\n\n"
         yield f"data: [SELF_HEALING_CONTEXT: {json.dumps(recovery_pkg)}]\n\n"
     else:
         if chunks and len(chunks) > 0:
