@@ -41,9 +41,48 @@ class EntropyEngine:
             return 0.0
         return float(statistics.pvariance(logprobs))
 
+    def get_token_type_weight(self, token: str) -> float:
+        """
+        Calculates a dynamic importance weight w(token) based on token taxonomy & POS semantics.
+        
+        Weighting rationale:
+        - Critical Risk (w = 2.8 - 3.5): Numeric data, dollar currencies, percentages, dates, codes (e.g. '$128,500', '42.8_days', 'CC-4471').
+          Hallucinations in these entities cause direct financial & compliance liabilities.
+        - High Risk (w = 2.0): Proper nouns, capitalized identifiers, technical enterprise terms.
+        - Medium Risk (w = 1.0): Content verbs, adjectives, general nouns.
+        - Low Risk (w = 0.45): Grammatical stop words, prepositions, articles ('the', 'is', 'to', 'for', 'of').
+        """
+        clean = (token or "").strip()
+        if not clean:
+            return 0.5
+
+        # 1. Critical: Financial, currency, digits, and quantitative claims
+        if any(char.isdigit() for char in clean) or any(c in clean for c in ["$", "€", "£", "%"]):
+            return 3.2
+
+        # 2. Critical: Specialized code / process identifiers (e.g. CASE-10231, CC-4471, W-99)
+        if "-" in clean and any(part.isupper() for part in clean.split("-")):
+            return 2.8
+
+        # 3. High: Capitalized Enterprise Named Entities / Proper Nouns
+        if clean[0].isupper() and len(clean) > 2 and not clean.endswith("."):
+            return 1.8
+
+        # 4. Low: Common grammatical stopwords / glue tokens
+        stopwords = {
+            "the", "a", "an", "is", "are", "was", "were", "to", "of", "in", "for", 
+            "on", "with", "at", "by", "from", "up", "about", "into", "over", "after",
+            "and", "or", "but", "if", "that", "this", "these", "those", "it", "its"
+        }
+        if clean.lower() in stopwords:
+            return 0.45
+
+        # 5. Baseline for general vocabulary
+        return 1.0
+
     def evaluate_token(self, token: str, logprob: Optional[float] = None, top_probs: Optional[List[float]] = None, context_history: Optional[List[str]] = None) -> Tuple[bool, float, float]:
         """
-        Evaluates an incoming token during decoding.
+        Evaluates an incoming token during decoding using Token-Type & POS-Aware Entropy Weighting.
         
         :param token: The decoded string token.
         :param logprob: The log-probability of the chosen token (if available).
@@ -72,13 +111,18 @@ class EntropyEngine:
         # 2. Calculate rolling variance over the sliding window
         rolling_variance = float(statistics.pvariance(self.history)) if len(self.history) >= 2 else 0.0
 
-        # Combine metric score (higher score = higher uncertainty/hallucination risk)
-        # Low probability or high variance inflates the uncertainty score
-        uncertainty_score = (1.0 - prob) + (2.0 * rolling_variance)
+        # 3. Dynamic POS & Entity Weighting
+        token_weight = self.get_token_type_weight(token)
 
-        is_hallucinating = uncertainty_score > self.tau
+        # Mathematical formulation:
+        # High uncertainty on numeric/financial entities (high weight) scales the score exponentially,
+        # while grammatical variations on stopwords (low weight) avoid triggering false positives.
+        raw_uncertainty = (1.0 - prob) + (2.0 * rolling_variance)
+        weighted_uncertainty_score = raw_uncertainty * token_weight
 
-        return is_hallucinating, uncertainty_score, rolling_variance
+        is_hallucinating = weighted_uncertainty_score > self.tau
+
+        return is_hallucinating, weighted_uncertainty_score, rolling_variance
 
     def evaluate_granite_payload(self, token_payload: Dict[str, Any], context_history: Optional[List[str]] = None) -> Tuple[bool, float, float]:
         """
