@@ -20,6 +20,7 @@ the point of keeping ingestion, chunking, and storage as separate
 functions.
 """
 
+import argparse
 import json
 import re
 from pathlib import Path
@@ -81,28 +82,38 @@ def chunk_summary(summary: dict) -> dict:
 # ---------------------------------------------------------------------
 # STEP 3: Embed + store in Milvus Lite
 # ---------------------------------------------------------------------
-def build_pipeline():
-    with open(DATA_PATH, "r") as f:
+def build_pipeline(data_path=DATA_PATH, db_path=MILVUS_DB_PATH, collection_name=COLLECTION_NAME):
+    with open(data_path, "r") as f:
         payload = json.load(f)
 
     chunks = [chunk_event(e) for e in payload["events"]]
     chunks.append(chunk_summary(payload["summary_metrics"]))
 
+    print(f"Loaded {len(payload['events'])} raw events from {data_path}")
     print(f"Prepared {len(chunks)} clean, PII-redacted chunks.")
+
+    # Integrity check: abort if any raw PII survived into a chunk.
+    leaked = [c for c in chunks if EMAIL_RE.search(c["text"]) or PHONE_RE.search(c["text"])]
+    if leaked:
+        print(f"WARNING: {len(leaked)} chunk(s) still contain raw PII after redaction:")
+        for c in leaked[:5]:
+            print("  -", c["text"])
+        raise SystemExit("Aborting ingestion: PII redaction failed integrity check.")
+    print("PII integrity check passed: no raw emails/phones in any chunk.")
 
     print(f"Loading embedding model '{EMBED_MODEL_NAME}' ...")
     model = SentenceTransformer(EMBED_MODEL_NAME)
     texts = [c["text"] for c in chunks]
     vectors = model.encode(texts, show_progress_bar=False).tolist()
 
-    print(f"Connecting to Milvus Lite at {MILVUS_DB_PATH} ...")
-    client = MilvusClient(uri=MILVUS_DB_PATH)
+    print(f"Connecting to Milvus Lite at {db_path} ...")
+    client = MilvusClient(uri=db_path)
 
-    if client.has_collection(COLLECTION_NAME):
-        client.drop_collection(COLLECTION_NAME)
+    if client.has_collection(collection_name):
+        client.drop_collection(collection_name)
 
     client.create_collection(
-        collection_name=COLLECTION_NAME,
+        collection_name=collection_name,
         dimension=len(vectors[0]),
         metric_type="COSINE",
     )
@@ -117,12 +128,16 @@ def build_pipeline():
         }
         for i in range(len(chunks))
     ]
-    client.insert(collection_name=COLLECTION_NAME, data=rows)
+    client.insert(collection_name=collection_name, data=rows)
 
-    print(f"Inserted {len(rows)} vectors into collection '{COLLECTION_NAME}'.")
-    print("Ingestion pipeline complete. This DB file is what Shivansh's")
-    print("RAG retriever (phase3_rag_retriever.py) will query from.")
+    print(f"Inserted {len(rows)} vectors into collection '{collection_name}'.")
+    return len(rows)
 
 
 if __name__ == "__main__":
-    build_pipeline()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", type=str, default=str(DATA_PATH))
+    parser.add_argument("--db", type=str, default=MILVUS_DB_PATH)
+    parser.add_argument("--collection", type=str, default=COLLECTION_NAME)
+    args = parser.parse_args()
+    build_pipeline(data_path=Path(args.data), db_path=args.db, collection_name=args.collection)
