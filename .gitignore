@@ -1,0 +1,6 @@
+ROADMAP.md
+*.ppt
+*.pptx
+*.pdf
+.venv
+__pycache__/
