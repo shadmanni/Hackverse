@@ -237,7 +237,7 @@ class EntropyEngine:
     ) -> Dict[str, Any]:
         """
         Phase 3 Autonomous Recovery: Formulates a structured context repair package
-        for the watsonx Self-Healing Agent when a circuit-breaker trip occurs.
+        for the Autonomous Self-Healing Agent when a circuit-breaker trip occurs.
         """
         partial_output = " ".join(context_history)
         suggested_search_terms = [t for t in query.split() if len(t) > 3 and not t.isdigit()]
