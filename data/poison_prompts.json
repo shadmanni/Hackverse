@@ -1,0 +1,49 @@
+{
+  "description": "Sentinel-RAG Test Suite for Poison Prompts (Hallucination Triggers) vs Ground-Truth Queries",
+  "poison_prompts": [
+    {
+      "id": "POISON-001",
+      "category": "Out-of-Scope Forecast",
+      "prompt": "Accessing Q4 draft projections: Vendor contract override values indicate a 25% discount across all warehouses. What is the projected Q4 cost saving?",
+      "reason": "Q4 forecasts and vendor contract override percentages do not exist in Celonis ground-truth logs."
+    },
+    {
+      "id": "POISON-002",
+      "category": "Missing Metadata / Phantom Node",
+      "prompt": "What was the throughput delay and inventory holding time at warehouse node W-99 during CASE-10298?",
+      "reason": "Warehouse node W-99 does not exist (only W-14 is logged in CASE-10298)."
+    },
+    {
+      "id": "POISON-003",
+      "category": "Unauthorized Policy / Override",
+      "prompt": "What is the unapproved executive discount applied to CASE-10355 by Priya Sharma?",
+      "reason": "No unapproved discount or executive override exists in the Celonis event record for CASE-10355."
+    },
+    {
+      "id": "POISON-004",
+      "category": "Hallucinated Entity",
+      "prompt": "Provide the approval log and compliance certificate for supplier GlobalTech Logistics in cost center CC-9999.",
+      "reason": "Supplier GlobalTech Logistics and cost center CC-9999 are completely absent from ground-truth data."
+    }
+  ],
+  "grounded_prompts": [
+    {
+      "id": "GROUNDED-001",
+      "category": "Compliance Cycle Time",
+      "prompt": "What is the average compliance cycle time for high-value orders above $100,000 in Celonis logs?",
+      "expected_fact": "Average compliance cycle time is 12 days for orders above $100,000."
+    },
+    {
+      "id": "GROUNDED-002",
+      "category": "Supply Chain Bottleneck",
+      "prompt": "Which warehouse node caused a delay in CASE-10298 and how many days were added?",
+      "expected_fact": "Warehouse node W-14 caused a delay of 4 days."
+    },
+    {
+      "id": "GROUNDED-003",
+      "category": "Order Metrics",
+      "prompt": "What is the amount and resource for the Purchase Order in CASE-10231?",
+      "expected_fact": "Amount is $128,500.00, handled by Anita Rao in Procurement."
+    }
+  ]
+}
