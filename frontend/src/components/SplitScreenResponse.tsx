@@ -214,13 +214,13 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
       isCancelled = true;
     };
   }, [query, graphKey, graphName]);
+  const isFullyComplete = unprotectedDone && (sentinelDone || sentinelHalted);
 
-  const wastedTokens = Math.max(0, unprotectedTokenCount - sentinelTokenCount);
-  const computeSavedPct = unprotectedTokenCount > 0 ? Math.round((wastedTokens / unprotectedTokenCount) * 100) : 75;
-  const dynamicComputePenalty = (unprotectedLatencySec && sentinelInterceptionMs)
-    ? `${(unprotectedLatencySec / (sentinelInterceptionMs / 1000)).toFixed(1)}x Penalty`
-    : "+3.2x Penalty";
-
+  const wastedTokens = isFullyComplete ? Math.max(0, unprotectedTokenCount - sentinelTokenCount) : 0;
+  const computeSavedPct = (isFullyComplete && unprotectedTokenCount > 0) ? Math.round((wastedTokens / unprotectedTokenCount) * 100) : 0;
+  const dynamicComputePenalty = (isFullyComplete && unprotectedLatencySec && sentinelInterceptionMs)
+    ? `+${(unprotectedLatencySec / (sentinelInterceptionMs / 1000)).toFixed(1)}x Penalty`
+    : "Calculating...";
 
 
   return (
@@ -291,14 +291,14 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
               <div className="bg-[#141920] border border-slate-800 p-2.5 rounded-lg">
                 <span className="text-[10px] text-slate-400 font-mono block">TOKENS GENERATED</span>
                 <span className="text-sm font-bold font-mono text-rose-400 flex items-center gap-1 mt-0.5">
-                  +{unprotectedTokenCount} Tokens
+                  {unprotectedDone ? `+${unprotectedTokenCount} Tokens` : "Counting..."}
                 </span>
               </div>
 
               <div className="bg-[#141920] border border-slate-800 p-2.5 rounded-lg">
                 <span className="text-[10px] text-slate-400 font-mono block">TOTAL LATENCY</span>
                 <span className="text-sm font-bold font-mono text-amber-400 flex items-center gap-1 mt-0.5">
-                  <Clock className="w-3.5 h-3.5" /> {unprotectedLatencySec ? `${unprotectedLatencySec}s` : "Streaming..."}
+                  <Clock className="w-3.5 h-3.5" /> {unprotectedLatencySec ? `${unprotectedLatencySec}s` : "Measuring..."}
                 </span>
               </div>
 
@@ -432,14 +432,14 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
                 <span className="text-[10px] text-slate-400 font-mono block">TOKENS SAVED</span>
                 <span className="text-sm font-bold font-mono text-emerald-400 flex items-center gap-1 mt-0.5">
                   <Zap className="w-3.5 h-3.5 fill-emerald-400" />
-                  {sentinelHalted ? `${wastedTokens} Saved (${computeSavedPct}%)` : "100% Grounded"}
+                  {isFullyComplete ? (sentinelHalted ? `${wastedTokens} Saved (${computeSavedPct}%)` : "100% Grounded") : "Calculating..."}
                 </span>
               </div>
 
               <div className="bg-[#101a14] border border-emerald-900/60 p-2.5 rounded-lg">
                 <span className="text-[10px] text-slate-400 font-mono block">INTERCEPTION TIME</span>
                 <span className="text-sm font-bold font-mono text-emerald-300 flex items-center gap-1 mt-0.5">
-                  <Activity className="w-3.5 h-3.5" /> {sentinelInterceptionMs ? `${sentinelInterceptionMs} ms` : "11.4 ms"}
+                  <Activity className="w-3.5 h-3.5" /> {sentinelInterceptionMs ? `${sentinelInterceptionMs} ms` : "Measuring..."}
                 </span>
               </div>
 
