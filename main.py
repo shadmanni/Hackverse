@@ -139,7 +139,7 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
             is_poison = any(k in q_lower for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
     else:
         q_lower = query_str.lower()
-        poison_words = ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999", "spiderman", "movie", "weather", "president", "sports", "joke"]
+        poison_words = ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"]
         is_poison = any(k in q_lower for k in poison_words)
 
     context_history: List[str] = []
