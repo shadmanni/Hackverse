@@ -26,13 +26,14 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from pymilvus import MilvusClient
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 
 DATA_PATH = BASE_DIR / "data" / "mock_celonis_data.json"
 POISON_PROMPTS_PATH = BASE_DIR / "data" / "poison_prompts.json"
 MILVUS_DB_PATH = str(BASE_DIR / "data" / "sentinel_milvus.db")
 COLLECTION_NAME = "celonis_ground_truth"
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
+CROSS_ENCODER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # Keywords & patterns that indicate intentional hallucination triggers / out-of-scope queries
 POISON_KEYWORDS = [
@@ -51,8 +52,10 @@ def _get_field(item: Any, field_name: str, default: Any = None) -> Any:
 
 class SentinelRAGRetriever:
     """
-    RAG Retriever & Ground-Truth Context Provider powered by Milvus Lite.
-    Includes built-in Poison Prompt interception and distance-threshold verification.
+    RAG Retriever & Ground-Truth Context Provider powered by Milvus Lite and CrossEncoder.
+    Implements 2-stage neural retrieval:
+      Stage 1: Dense Vector Retrieval (Bi-Encoder / Milvus Lite).
+      Stage 2: Cross-Encoder Neural Reranking for high-precision semantic alignment.
     """
 
     def __init__(
@@ -60,6 +63,7 @@ class SentinelRAGRetriever:
         db_path: str = MILVUS_DB_PATH,
         collection_name: str = COLLECTION_NAME,
         model_name: str = EMBED_MODEL_NAME,
+        cross_encoder_name: str = CROSS_ENCODER_MODEL_NAME,
         similarity_threshold: float = 0.35,
     ):
         self.db_path = db_path
@@ -68,6 +72,14 @@ class SentinelRAGRetriever:
 
         print(f"[SentinelRAGRetriever] Initializing SentenceTransformer('{model_name}')...")
         self.encoder = SentenceTransformer(model_name)
+
+        print(f"[SentinelRAGRetriever] Initializing CrossEncoder('{cross_encoder_name}')...")
+        try:
+            self.cross_encoder = CrossEncoder(cross_encoder_name)
+            self.has_cross_encoder = True
+        except Exception as ce_err:
+            print(f"[SentinelRAGRetriever] CrossEncoder fallback to bi-encoder: {ce_err}")
+            self.has_cross_encoder = False
 
         print(f"[SentinelRAGRetriever] Connecting to Milvus Lite at {db_path}...")
         self.client = MilvusClient(uri=db_path)
@@ -83,16 +95,19 @@ class SentinelRAGRetriever:
 
     def retrieve(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """
-        Encodes user query into vector space and searches Milvus Lite collection.
-        Returns top-k matching ground-truth chunks with similarity scores.
+        Two-stage retrieval:
+        1. Encodes query and retrieves top candidates from Milvus Lite.
+        2. Reranks candidate pairs using the Cross-Encoder.
         """
         query_text = query or ""
         query_vector = self.encoder.encode([query_text], show_progress_bar=False).tolist()[0]
 
+        # Stage 1: Dense Retrieval (fetch top-k * 2 candidates for reranking)
+        fetch_limit = top_k * 2
         results = self.client.search(
             collection_name=self.collection_name,
             data=[query_vector],
-            limit=top_k,
+            limit=fetch_limit,
             output_fields=["case_id", "activity", "text"],
         )
 
@@ -100,8 +115,6 @@ class SentinelRAGRetriever:
         if results and len(results) > 0:
             for res in results[0]:
                 distance = _get_field(res, "distance", 0.0)
-                # COSINE metric in Milvus Lite: distance ranges from -1 to 1 (or 0 to 1 for normalized)
-                # Higher score = more similar
                 score = round(float(distance), 4)
                 entity = _get_field(res, "entity", {})
                 
@@ -118,7 +131,20 @@ class SentinelRAGRetriever:
                     "text": text,
                 })
 
-        return hits
+        # Stage 2: Cross-Encoder Reranking
+        if hits and self.has_cross_encoder:
+            pairs = [[query_text, h["text"] or ""] for h in hits]
+            cross_scores = self.cross_encoder.predict(pairs)
+            for i, h in enumerate(hits):
+                h["cross_encoder_score"] = round(float(cross_scores[i]), 4)
+                # Weighted fusion score: 60% Cross-Encoder + 40% Vector Cosine
+                h["similarity_score"] = round(0.6 * float(cross_scores[i]) + 0.4 * h["similarity_score"], 4)
+
+            # Sort descending by cross-encoder score
+            hits = sorted(hits, key=lambda x: x["similarity_score"], reverse=True)
+
+        return hits[:top_k]
+
 
     def is_poison_prompt(self, query: str, retrieved_chunks: List[Dict[str, Any]] = None) -> Tuple[bool, str]:
         """
