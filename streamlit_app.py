@@ -428,7 +428,7 @@ if execute_btn and user_query:
                 # Trigger HTTP POST /recover to backend API
                 recovered_text = "Q4 forecast override table requires Senior Compliance Officer cryptographic key sign-off. Event log timestamp #CE-9941 confirms zero unannounced overrides active."
                 recovery_strategy = "vector_rerank_milvus_dense_search"
-                agent_name = "watsonx-Autonomous-Self-Healing-Agent"
+                agent_name = "Autonomous-Self-Healing-Agent"
 
                 try:
                     rec_resp = requests.post(
@@ -457,12 +457,12 @@ if execute_btn and user_query:
                         Generative decoder halted immediately to prevent financial hallucination liability.
                     </p>
                     <hr style="border-color:#e11d48; margin:10px 0;">
-                    <h5 style="color:#d97706; margin:5px 0;">[FALLBACK SIGNAL] Triggering IBM watsonx Autonomous Self-Healing Subagent...</h5>
+                    <h5 style="color:#d97706; margin:5px 0;">[FALLBACK SIGNAL] Triggering Autonomous Self-Healing Subagent...</h5>
                     <p style="margin:0 0 8px 0; font-size:0.88rem; color:#9ca3af;">
                         Agent: <b>{agent_name}</b> | Strategy: <code>{recovery_strategy}</code>
                     </p>
                     <div style="background:#090b0d; border-left:3px solid #10b981; padding:12px; margin-top:10px; font-family:'JetBrains Mono'; font-size:0.88rem; color:#e5e7eb;">
-                        <span style="color:#10b981; font-weight:bold;">[watsonx Self-Healing Agent Result]:</span><br>
+                        <span style="color:#10b981; font-weight:bold;">[Self-Healing Agent Result]:</span><br>
                         {recovered_text}
                     </div>
                     <div style="margin-top:10px; font-size:0.8rem; color:#10b981;">

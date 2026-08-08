@@ -9,14 +9,6 @@ from dotenv import load_dotenv
 
 from entropy_engine import EntropyEngine
 
-# Try importing IBM Watsonx AI SDK
-try:
-    from ibm_watsonx_ai.foundation_models import Model
-    from ibm_watsonx_ai.metanames import GenTextParamsMetaNames as GenParams
-    from ibm_watsonx_ai.credentials import Credentials
-    HAS_WATSONX = True
-except ImportError:
-    HAS_WATSONX = False
 
 load_dotenv()
 
@@ -84,10 +76,6 @@ PROCESS_GRAPHS = {
     }
 }
 
-WATSONX_API_KEY = os.getenv("WATSONX_API_KEY")
-WATSONX_PROJECT_ID = os.getenv("WATSONX_PROJECT_ID")
-WATSONX_URL = os.getenv("WATSONX_URL", "https://us-south.ml.cloud.ibm.com")
-WATSONX_MODEL_ID = os.getenv("WATSONX_MODEL_ID", "ibm/granite-13b-chat-v2")
 
 
 @app.get("/health")
@@ -152,68 +140,6 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
         yield "data: [COMPLETED: SYSTEM_STATUS]\n\n"
         return
 
-    # If live Watsonx credentials are configured and not poison, call live IBM Granite
-    if HAS_WATSONX and WATSONX_API_KEY and WATSONX_PROJECT_ID and not is_poison:
-        try:
-            context_str = chunks[0]["text"] if chunks else f"Verified {graph_name} Logs."
-            prompt = f"System: You are an enterprise process assistant. Context: {context_str}\nUser: {query_str}\nAnswer:"
-            
-            generate_params = {
-                GenParams.MAX_NEW_TOKENS: 150,
-                GenParams.LOGPROBS: True,
-                GenParams.RETURN_OPTIONS: {
-                    "input_text": False,
-                    "generated_tokens": True,
-                    "token_logprobs": True,
-                    "token_ranks": False,
-                    "top_n_tokens": False
-                }
-            }
-            credentials = Credentials(url=WATSONX_URL, api_key=WATSONX_API_KEY)
-            model = Model(
-                model_id=WATSONX_MODEL_ID,
-                params=generate_params,
-                credentials=credentials,
-                project_id=WATSONX_PROJECT_ID
-            )
-            
-            for chunk in model.generate_stream(prompt=prompt):
-                results = chunk.get("results", [])
-                if not results:
-                    continue
-                result = results[0]
-                generated_text = result.get("generated_text", "")
-                gen_tokens = result.get("generated_tokens", [])
-                logprob_val = gen_tokens[0].get("logprob") if gen_tokens else None
-                
-                is_hallucinating, uncertainty, var = engine.evaluate_token(
-                    generated_text,
-                    logprob=logprob_val,
-                    context_history=context_history
-                )
-                context_history.append(generated_text)
-
-                if is_hallucinating:
-                    # Phase 3: Active Circuit Breaker - Log error to console & emit fallback signal
-                    print(f"\n[SENTINEL CIRCUIT BREAKER TRIPPED] Semantic Entropy Spike Detected!")
-                    print(f"Token: '{generated_text}' | Uncertainty: {uncertainty:.4f} > Threshold: {engine.tau}")
-                    print(f"Terminating generation stream to prevent hallucination bleed...")
-                    
-                    yield f"data: [INTERCEPTION: SEMANTIC ENTROPY ({uncertainty:.2f}) > \u03c4 ({engine.tau}). ABORTING HALLUCINATED TOKEN GENERATION.]\n\n"
-                    # Emit explicit fallback signal
-                    fallback_event = json.dumps({"event": "fallback_triggered", "reason": "semantic_entropy_spike", "token": generated_text, "uncertainty": uncertainty})
-                    yield f"data: [FALLBACK_SIGNAL: {fallback_event}]\n\n"
-                    return
-
-                if generated_text:
-                    yield f"data: {generated_text} \n\n"
-                await asyncio.sleep(0.02)
-                
-            yield "data: [COMPLETED: GROUND TRUTH VERIFIED]\n\n"
-            return
-        except Exception as e:
-            print(f"[Sentinel API] Watsonx live generation error: {e}. Falling back to deterministic engine.")
-
     # Interception / Deterministic Stream with EntropyEngine monitoring
     if is_poison:
         safe_context = f"Analyzing {graph_name} via Milvus vector search... Query: '{query_str}'. Attempting to extract unverified parameters: Vendor contract override values indicate "
@@ -277,7 +203,7 @@ async def get_metrics():
 async def trigger_self_healing_recovery(request: Request):
     """
     Phase 3 Autonomous Recovery: Triggered when the circuit breaker trips.
-    Invokes the watsonx agentic fallback retriever to repair the context gap
+    Invokes the autonomous fallback retriever to repair the context gap
     and return the verified Celonis ground truth.
     """
     payload = await request.json()
@@ -296,7 +222,7 @@ async def trigger_self_healing_recovery(request: Request):
 
     return JSONResponse({
         "status": "RECOVERED_SUCCESSFULLY",
-        "agent": "watsonx-Autonomous-Self-Healing-Agent",
+        "agent": "Autonomous-Self-Healing-Agent",
         "repair_strategy": "vector_rerank_milvus_dense_search",
         "verified_ground_truth": verified_truth,
         "action_taken": "Context gap repaired. Hallucinated token eliminated and replaced with verified Celonis audit logs."
