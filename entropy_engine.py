@@ -89,14 +89,35 @@ class EntropyEngine:
         # 5. Baseline for general vocabulary
         return 1.0
 
-    def evaluate_token(self, token: str, logprob: Optional[float] = None, top_probs: Optional[List[float]] = None, context_history: Optional[List[str]] = None) -> Tuple[bool, float, float]:
+    def compute_contrastive_pmi(self, token: str, logprob_with_context: float, context_history: Optional[List[str]] = None) -> float:
         """
-        Evaluates an incoming token during decoding using Token-Type & POS-Aware Entropy Weighting.
+        Version 4 Innovation: Pointwise Mutual Information (PMI) / Contrastive RAG Logprob Ratio.
+        
+        Calculates how strongly a generated token depends on the retrieved Celonis RAG context:
+            PMI(x_t; Context) = log P(x_t | context) - log P(x_t | ungrounded_parametric_memory)
+            
+        - High positive PMI: Token is strongly supported by Celonis ground truth.
+        - Low or negative PMI: Token relies on ungrounded model parametric memory (hallucination risk).
+        """
+        # Baseline prior probability without context
+        unconditioned_logprob = self.draft_extractor.estimate_draft_logprob([], token)
+        
+        # Contrastive delta: difference between contextual logprob and prior
+        contrastive_ratio = logprob_with_context - unconditioned_logprob
+        
+        # If contrastive ratio is negative, model is generating against grounding -> penalty multiplier
+        pmi_penalty = max(0.0, -contrastive_ratio)
+        return float(pmi_penalty)
+
+    def evaluate_token(self, token: str, logprob: Optional[float] = None, top_probs: Optional[List[float]] = None, context_history: Optional[List[str]] = None, use_contrastive: bool = True) -> Tuple[bool, float, float]:
+        """
+        Evaluates an incoming token during decoding using Version 4 Contrastive RAG Logprob Ratio + POS Weighting + O(1) EMA.
         
         :param token: The decoded string token.
         :param logprob: The log-probability of the chosen token (if available).
         :param top_probs: Optional distribution over top candidates to calculate Shannon entropy.
         :param context_history: Streaming context history for draft estimation.
+        :param use_contrastive: Enable Version 4 Contrastive PMI ratio evaluation.
         :return: (is_hallucinating, metric_value, rolling_variance)
         """
         # If logprob isn't provided directly, use draft model logic to estimate it from context
@@ -134,10 +155,13 @@ class EntropyEngine:
         # 3. Dynamic POS & Entity Weighting
         token_weight = self.get_token_type_weight(token)
 
+        # 4. Version 4 Contrastive RAG Logprob Ratio (PMI)
+        pmi_penalty = self.compute_contrastive_pmi(token, logprob, context_history) if use_contrastive else 0.0
+
         # Mathematical formulation:
-        # High uncertainty on numeric/financial entities (high weight) scales the score exponentially,
-        # while grammatical variations on stopwords (low weight) avoid triggering false positives.
-        raw_uncertainty = (1.0 - prob) + (2.0 * rolling_variance)
+        # High uncertainty on numeric/financial entities scaled by contrastive context gap
+        # Contrastive PMI penalty is weighted by token_weight so stopwords don't trigger false positives
+        raw_uncertainty = (1.0 - prob) + (2.0 * rolling_variance) + (0.5 * pmi_penalty)
         weighted_uncertainty_score = raw_uncertainty * token_weight
 
         is_hallucinating = weighted_uncertainty_score > self.tau
