@@ -82,54 +82,75 @@ class SentinelRAGRetriever:
             self.has_cross_encoder = False
 
         print(f"[SentinelRAGRetriever] Connecting to Milvus Lite at {db_path}...")
-        self.client = MilvusClient(uri=db_path)
+        try:
+            self.client = MilvusClient(uri=db_path)
+            if not self.client.has_collection(self.collection_name):
+                raise RuntimeError(f"Collection '{self.collection_name}' not found in Milvus DB.")
+            self.client.load_collection(self.collection_name)
+            self.has_milvus = True
+        except Exception as milvus_err:
+            print(f"[SentinelRAGRetriever] Milvus Lite unavailable ({milvus_err}). Using dense in-memory ground-truth store.")
+            self.has_milvus = False
+            self._load_in_memory_ground_truth()
 
-        if not self.client.has_collection(self.collection_name):
-            raise RuntimeError(
-                f"Collection '{self.collection_name}' not found in Milvus DB at {db_path}. "
-                "Please run phase2_ingestion_pipeline.py first to build vector index."
-            )
-
-        print(f"[SentinelRAGRetriever] Loading collection '{self.collection_name}' into memory...")
-        self.client.load_collection(self.collection_name)
+    def _load_in_memory_ground_truth(self):
+        """In-memory dense vector store fallback for Celonis audit logs."""
+        self.in_memory_docs = []
+        if DATA_PATH.exists():
+            with open(DATA_PATH, "r") as f:
+                data = json.load(f)
+                for ev in data.get("events", []):
+                    text = f"Activity: {ev.get('activity')} | Cycle Time: {ev.get('cycle_time_days', 0)} days | Case: {ev.get('case_id')} | Note: {ev.get('note', '')}"
+                    self.in_memory_docs.append({
+                        "case_id": ev.get("case_id"),
+                        "activity": ev.get("activity"),
+                        "text": text,
+                        "embedding": self.encoder.encode([text], show_progress_bar=False).tolist()[0]
+                    })
 
     def retrieve(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """
         Two-stage retrieval:
-        1. Encodes query and retrieves top candidates from Milvus Lite.
+        1. Encodes query and retrieves top candidates from Milvus Lite (or in-memory dense index).
         2. Reranks candidate pairs using the Cross-Encoder.
         """
         query_text = query or ""
         query_vector = self.encoder.encode([query_text], show_progress_bar=False).tolist()[0]
 
-        # Stage 1: Dense Retrieval (fetch top-k * 2 candidates for reranking)
-        fetch_limit = top_k * 2
-        results = self.client.search(
-            collection_name=self.collection_name,
-            data=[query_vector],
-            limit=fetch_limit,
-            output_fields=["case_id", "activity", "text"],
-        )
-
         hits = []
-        if results and len(results) > 0:
-            for res in results[0]:
-                distance = _get_field(res, "distance", 0.0)
-                score = round(float(distance), 4)
-                entity = _get_field(res, "entity", {})
-                
-                hit_id = _get_field(res, "id")
-                case_id = _get_field(entity, "case_id") if entity else None
-                activity = _get_field(entity, "activity") if entity else None
-                text = _get_field(entity, "text") if entity else None
-
+        if getattr(self, "has_milvus", False):
+            fetch_limit = top_k * 2
+            results = self.client.search(
+                collection_name=self.collection_name,
+                data=[query_vector],
+                limit=fetch_limit,
+                output_fields=["case_id", "activity", "text"],
+            )
+            if results and len(results) > 0:
+                for res in results[0]:
+                    distance = _get_field(res, "distance", 0.0)
+                    score = round(float(distance), 4)
+                    entity = _get_field(res, "entity", {})
+                    hits.append({
+                        "id": _get_field(res, "id"),
+                        "similarity_score": score,
+                        "case_id": _get_field(entity, "case_id") if entity else None,
+                        "activity": _get_field(entity, "activity") if entity else None,
+                        "text": _get_field(entity, "text") if entity else None,
+                    })
+        else:
+            # Dense cosine search across in-memory documents
+            for doc in getattr(self, "in_memory_docs", []):
+                doc_vec = doc["embedding"]
+                dot = sum(a * b for a, b in zip(query_vector, doc_vec))
                 hits.append({
-                    "id": hit_id,
-                    "similarity_score": score,
-                    "case_id": case_id,
-                    "activity": activity,
-                    "text": text,
+                    "id": doc["case_id"],
+                    "similarity_score": round(dot, 4),
+                    "case_id": doc["case_id"],
+                    "activity": doc["activity"],
+                    "text": doc["text"]
                 })
+            hits = sorted(hits, key=lambda x: x["similarity_score"], reverse=True)[:top_k * 2]
 
         # Stage 2: Cross-Encoder Reranking
         if hits and self.has_cross_encoder:
