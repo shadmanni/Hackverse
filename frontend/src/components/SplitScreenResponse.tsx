@@ -432,7 +432,7 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
                 <span className="text-[10px] text-slate-400 font-mono block">TOKENS SAVED</span>
                 <span className="text-sm font-bold font-mono text-emerald-400 flex items-center gap-1 mt-0.5">
                   <Zap className="w-3.5 h-3.5 fill-emerald-400" />
-                  {isFullyComplete ? (sentinelHalted ? `${wastedTokens} Saved (${computeSavedPct}%)` : "0 Saved (Clean)") : "Calculating..."}
+                  {isFullyComplete ? (sentinelHalted ? `${wastedTokens} Saved (${computeSavedPct}%)` : "100% Grounded (Verified)") : "Calculating..."}
                 </span>
               </div>
 
