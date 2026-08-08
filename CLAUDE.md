@@ -2,7 +2,7 @@
 
 **Project Name:** Sentinel-RAG (Enterprise Trust Middleware for Process Intelligence)  
 **Track:** AI for Business Transformation[cite: 1, 2]  
-**Sponsor Integrations:** IBM Granite, IBM Data Prep Kit, IBM watsonx.data, Celonis EMS[cite: 1, 2]  
+**Sponsor Integrations:** IBM Granite, IBM Data Prep Kit, Milvus Enterprise Vector Store, Celonis EMS[cite: 1, 2]  
 **Development Stack:** IBM Bob (Orchestration & Code Acceleration) + Custom Python Evaluation Pipeline  
 
 ---
@@ -39,10 +39,10 @@ Sentinel-RAG introduces a complete paradigm shift: moving hallucination detectio
 Sentinel-RAG is a highly optimized architecture utilizing the best of the IBM ecosystem, orchestrated via **IBM Bob**.
 
 * **Layer 1: IBM Data Prep Kit (Ingestion & Privacy)** - Intercepts raw Celonis EMS event logs. We utilize PII data masking to discover, remove, or hide sensitive information from datasets, directly mitigating security and compliance risks while allowing the data to be securely utilized for analysis[cite: 3]. 
-* **Layer 2: IBM watsonx.data / Milvus (Storage)** - The dense vector database storing ground-truth process metadata.
+* **Layer 2: Milvus Lite Vector Database (Storage)** - The dense vector database storing ground-truth process metadata.
 * **Layer 3: IBM Granite (Generation)** - The primary generative engine (e.g., Granite-13b-chat), processing complex prompts containing retrieved Celonis process metrics[cite: 1, 2].
 * **Layer 4: Semantic Entropy Evaluator (The Core Logic)** - A specialized Python evaluation layer that actively calculates predictive variance and log-probabilities on the generated output in real-time.
-* **Layer 5: Autonomous Recovery (Self-Healing Agents)** - When the evaluator logs an entropy error, it triggers an IBM watsonx-powered subagent to dynamically formulate a new vector search strategy and repair the context gap[cite: 1, 2].
+* **Layer 5: Autonomous Recovery (Self-Healing Agents)** - When the evaluator logs an entropy error, it triggers an autonomous agentic fallback to dynamically formulate a new vector search strategy and repair the context gap[cite: 1, 2].
 
 ---
 
@@ -82,7 +82,7 @@ The team is fully certified under the IBM SkillsBuild "Future Forward: AI for In
 * **Shivansh (Lead Evaluator):** Integrate Riddhi's math engine directly into the live token loop. Implement the active circuit breaker: if the variance threshold is breached, physically terminate the generation stream, log the error to the console, and emit a fallback signal to the frontend.
 * **Shadman (Data Pipeline):** Connect the Milvus retriever to the Granite prompt context. Refine a set of "Poison Prompts" designed to ask for data *missing* from the vector store, forcing the LLM into stochastic guesswork and reliably triggering the firewall.
 * **Riddhi (Entropy Analytics):** Test the live engine against both factual and hallucinated outputs. Begin calibrating the mathematical threshold ($\tau$) to perfectly differentiate between confident reasoning and ungrounded fabrication.
-* **Shaurya (Visualizations):** Wire the fallback signal to the IBM watsonx-powered subagent. When the UI receives the error log, trigger the self-healing agent to dynamically formulate a new vector search strategy, repair the context gap, and stream the corrected response[cite: 3].
+* **Shaurya (Visualizations):** Wire the fallback signal to the autonomous recovery subagent. When the UI receives the error log, trigger the self-healing agent to dynamically formulate a new vector search strategy, repair the context gap, and stream the corrected response[cite: 3].
 
 ### PHASE 4: Hardening, Enterprise Polish & Final Pitch Prep
 * **Goal:** Secure the "Technical Excellence" and "UX & Design" rubric marks for the final Monday evaluation.
@@ -103,7 +103,7 @@ The team is fully certified under the IBM SkillsBuild "Future Forward: AI for In
 
 ### Round 2: The Final Pitch
 * **Working Prototype (25pts):** The Split-Screen Demo. Left: Unprotected Granite hallucinating. Right: Sentinel-RAG predicting the hallucination, logging the error, halting the stream, and self-correcting via a subagent.
-* **Problem-Solution Fit (20pts):** The Buyer Narrative. Built for IBM Consulting to derisk Watsonx integrations in highly regulated sectors, specifically addressing the 4.3 hours/week wasted on verification[cite: 3].
+* **Problem-Solution Fit (20pts):** The Buyer Narrative. Built for enterprise consulting to derisk GenAI integrations in highly regulated sectors, specifically addressing the 4.3 hours/week wasted on verification[cite: 3].
 * **Technical Excellence (15pts):** Highlight the IBM Data Prep Kit (PII compliance)[cite: 3], Milvus, and the direct Python semantic entropy evaluation logic.
 * **UX & Design (10pts):** The Security Terminal Feel. Live Semantic Entropy Variance graph flashing on breaches.
 * **Impact & Scalability (10pts):** Model-Agnostic. Sentinel-RAG natively supports real-time visibility, enterprise controls, and continuous accountability[cite: 3].

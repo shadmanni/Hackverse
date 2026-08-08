@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.gitignore
+.dockerignore
+.env
+.pytest_cache/
+.gemini/
+brain/
+scratch/
+start.bat
+start.ps1

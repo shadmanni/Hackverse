@@ -199,27 +199,89 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. Sidebar Navigation & System Telemetry ---
+# --- 3. Asynchronous API & Vector DB Polling Logic ---
+@st.cache_data(ttl=5)
+def poll_backend_telemetry():
+    """Asynchronous polling function to monitor proxy health & Milvus vector DB status"""
+    try:
+        res = requests.get("http://localhost:8000/health", timeout=1.5)
+        if res.status_code == 200:
+            return res.json(), True
+    except Exception:
+        pass
+    return {
+        "status": "OFFLINE_FALLBACK",
+        "backend": "Antigravity Sidecar (Local Engine)",
+        "port": 8000,
+        "interception_latency_ms": 11.4,
+        "milvus_status": "STANDALONE_MOCK",
+        "milvus_host": "milvus-standalone:19530",
+        "circuit_breaker_tau": 0.420
+    }, False
+
+telemetry_data, is_live_backend = poll_backend_telemetry()
+
+# --- 4. Sidebar Navigation, Vector DB Selector & System Telemetry ---
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/5/51/IBM_logo.svg", width=120)
     st.markdown("### Sentinel Firewall")
     st.caption("Enterprise Trust Middleware v2.4")
     st.divider()
 
+    st.markdown("#### Vector Database Integration")
+    st.caption("Powered by **Milvus Standalone** & **IBM Data Prep Kit**")
+    
+    # Process Graph Selector (Shaurya Phase 2 Deliverable)
+    selected_graph_label = st.selectbox(
+        "Target Celonis Process Graph:",
+        options=[
+            "Purchase-to-Pay (P2P) Event Graph",
+            "Order-to-Cash (O2C) Workflow",
+            "Accounts Payable (AP) Compliance Audit",
+            "Global Logistics & Supply Chain"
+        ],
+        index=0,
+        help="Select which Celonis process graph collection to retrieve ground-truth vector embeddings from."
+    )
+
+    graph_key_map = {
+        "Purchase-to-Pay (P2P) Event Graph": "p2p",
+        "Order-to-Cash (O2C) Workflow": "o2c",
+        "Accounts Payable (AP) Compliance Audit": "ap_audit",
+        "Global Logistics & Supply Chain": "supply_chain"
+    }
+    selected_graph_key = graph_key_map[selected_graph_label]
+
+    graph_details = {
+        "p2p": {"collection": "celonis_p2p_chunks", "vectors": "1,420", "chunks": "PII Masked"},
+        "o2c": {"collection": "celonis_o2c_chunks", "vectors": "980", "chunks": "PII Masked"},
+        "ap_audit": {"collection": "celonis_ap_audit_chunks", "vectors": "2,150", "chunks": "PII Masked"},
+        "supply_chain": {"collection": "celonis_supply_chain_chunks", "vectors": "3,400", "chunks": "PII Masked"}
+    }[selected_graph_key]
+
+    st.markdown(f"- **Collection:** `{graph_details['collection']}`")
+    st.markdown(f"- **Vectors Ingested:** `{graph_details['vectors']}`")
+    st.markdown(f"- **Data Prep Kit:** `Zero-Knowledge PII`")
+    st.markdown(f"- **Embedding Engine:** `IBM Slate / BGE`")
+
+    st.divider()
     st.markdown("#### Active Guardrails")
     st.markdown("- **Engine:** IBM Granite-13B Chat")
-    st.markdown("- **Interception Latency:** `11.4 ms`")
-    st.markdown("- **Entropy Threshold (τ):** `0.420`")
-    st.markdown("- **Data Masking:** Zero-Knowledge PII")
+    st.markdown(f"- **Interception Latency:** `{telemetry_data.get('interception_latency_ms', 11.4)} ms`")
+    st.markdown(f"- **Entropy Threshold (τ):** `{telemetry_data.get('circuit_breaker_tau', 0.420)}`")
     st.markdown("- **Ground Truth Source:** Celonis EMS")
 
     st.divider()
     st.markdown("#### System Status")
-    st.markdown('<div class="badge-live"><span class="badge-pulse"></span> SYSTEM NOMINAL</div>', unsafe_allow_html=True)
-    st.caption("Antigravity Sidecar Proxy: **Connected**")
-    st.caption("watsonx Agentic Fallback: **Standby**")
+    if is_live_backend:
+        st.markdown('<div class="badge-live"><span class="badge-pulse"></span> SYSTEM NOMINAL</div>', unsafe_allow_html=True)
+        st.caption("Antigravity Sidecar Proxy: **Connected (Port 8000)**")
+        st.caption("Milvus Vector Store: **Connected (Port 19530)**")
+    else:
+        st.markdown('<div class="badge-live" style="color:#d97706; border-color:#d97706;"><span class="badge-pulse" style="background-color:#d97706;"></span> OFFLINE SIMULATION</div>', unsafe_allow_html=True)
+        st.caption("Antigravity Sidecar Proxy: **Standby Generator**")
 
-# --- 4. Main Title Header & Branding ---
+# --- 5. Main Title Header & Branding ---
 col_head1, col_head2 = st.columns([3, 1])
 with col_head1:
     st.markdown('<h1 class="title-main">Sentinel-RAG Security Terminal</h1>', unsafe_allow_html=True)
@@ -231,8 +293,9 @@ with col_head2:
 
 st.markdown("---")
 
-# --- 5. Custom Query Input & Preset Selector ---
+# --- 6. Custom Query Input & Preset Selector ---
 st.markdown("### Enterprise Process Intelligence Query")
+st.caption(f"Querying Active Vector Collection: **{graph_details['collection']}** ({graph_details['vectors']} chunks)")
 
 # Presets handling via session state
 if "query_input" not in st.session_state:
@@ -263,7 +326,7 @@ execute_btn = st.button("Execute Query via IBM Granite Sentinel Proxy", use_cont
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# --- 6. Execution Loop & Live Visualizations ---
+# --- 7. Execution Loop & Live Visualizations ---
 if execute_btn and user_query:
     col_term, col_analytics = st.columns([7, 5])
 
@@ -282,8 +345,8 @@ if execute_btn and user_query:
     full_response = ""
     interception_triggered = False
 
-    # Standard stream endpoint
-    api_url = f"http://localhost:8000/stream?query={requests.utils.quote(user_query)}"
+    # Standard stream endpoint with selected graph parameter
+    api_url = f"http://localhost:8000/stream?query={requests.utils.quote(user_query)}&graph={selected_graph_key}"
 
     try:
         # Attempt connecting to live FastAPI Proxy
@@ -292,6 +355,7 @@ if execute_btn and user_query:
         backend_connected = True
     except Exception as e:
         backend_connected = False
+
         # Fallback offline generator if backend not active
         is_poison = any(k in user_query.lower() for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4"])
         if is_poison:
