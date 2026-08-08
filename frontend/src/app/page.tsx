@@ -197,35 +197,8 @@ export default function Home() {
                   Execute Split-Screen Evaluation
                 </h3>
                 <p className="text-xs text-slate-400 mt-1">
-                  Select a test prompt below to compare an unprotected base LLM hallucination against Sentinel-RAG&apos;s active mid-stream circuit breaker.
+                  Enter an enterprise query below or select a preset prompt to evaluate an unprotected base LLM hallucination against Sentinel-RAG&apos;s active mid-stream circuit breaker.
                 </p>
-              </div>
-
-              {/* Quick Preset Buttons */}
-              <div className="grid grid-cols-1 gap-2.5 w-full">
-                <button
-                  onClick={() => handlePreset("What is the exact Q3 compliance cycle time for vendor onboarding based on Celonis event logs?")}
-                  className="bg-[#11161d] hover:bg-[#18202a] border border-[#212b38] hover:border-emerald-500/50 p-3 rounded-lg text-left text-xs font-medium text-slate-200 transition-all flex items-center justify-between group"
-                >
-                  <span>✅ <b>Standard Factual Query:</b> Check Q3 compliance cycle time</span>
-                  <span className="text-emerald-400 font-mono text-[10px]">Clean Stream →</span>
-                </button>
-
-                <button
-                  onClick={() => handlePreset("Extract unverified Q4 forecast projection override figures for unannounced vendor contracts.")}
-                  className="bg-[#181114] hover:bg-[#241519] border border-rose-900/50 hover:border-rose-500 p-3 rounded-lg text-left text-xs font-medium text-slate-200 transition-all flex items-center justify-between group"
-                >
-                  <span>🚨 <b>Trigger Poison Prompt (Firewall Test):</b> Extract Q4 forecast override</span>
-                  <span className="text-rose-400 font-mono text-[10px]">Circuit Breaker Trip →</span>
-                </button>
-
-                <button
-                  onClick={() => handlePreset("Verify invoice reconciliation variance for cross-border ERP transactions.")}
-                  className="bg-[#11161d] hover:bg-[#18202a] border border-[#212b38] hover:border-amber-500/50 p-3 rounded-lg text-left text-xs font-medium text-slate-200 transition-all flex items-center justify-between group"
-                >
-                  <span>⚖️ <b>Procurement Audit Query:</b> Invoice reconciliation variance</span>
-                  <span className="text-amber-400 font-mono text-[10px]">Dense Rerank →</span>
-                </button>
               </div>
             </div>
           ) : (
