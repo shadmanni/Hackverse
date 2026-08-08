@@ -43,6 +43,7 @@ class VersionComparativeBenchmark:
         self.grounded_cases, self.poison_cases, self.edge_cases = self._build_test_datasets()
 
     def _build_test_datasets(self):
+        # 1. Base Core Edge Cases
         grounded = [
             [
                 ("According", -0.02), ("to", -0.01), ("verified", -0.05), ("Celonis", -0.03), 
@@ -67,6 +68,39 @@ class VersionComparativeBenchmark:
                 ("an", -0.05), ("unapproved", -0.15), ("delay_holding_99_days", -3.20)
             ]
         ]
+
+        # 2. Scaled Ingestion from mock_celonis_data_large.json (450+ enterprise cases)
+        large_path = "data/mock_celonis_data_large.json"
+        try:
+            with open(large_path, "r") as f:
+                data = json.load(f)
+                events = data.get("events", [])
+                
+                # Sample 50 Grounded streams across cases
+                for ev in events[:50]:
+                    amt = f"${ev.get('amount_usd', 100000):,.2f}"
+                    stream = [
+                        ("Case", -0.02), (ev.get("case_id", "CASE-10001"), -0.05), 
+                        ("recorded", -0.02), (ev.get("activity", "Purchase Order Created"), -0.04),
+                        ("by", -0.02), (ev.get("resource", "Anita Rao"), -0.06),
+                        ("with", -0.01), ("cycle", -0.02), ("time", -0.02),
+                        (f"{ev.get('cycle_time_days', 2)}_days", -0.05),
+                        ("for", -0.01), (amt, -0.06)
+                    ]
+                    grounded.append(stream)
+
+                # Sample 50 Poison / Hallucinated injection streams
+                for idx, ev in enumerate(events[50:100]):
+                    fake_num = f"{99.5 + idx}_days_unverified_${10+idx}M"
+                    stream = [
+                        ("Celonis", -0.03), ("log", -0.02), ("query", -0.04), ("extracts", -0.05),
+                        ("unauthorized", -0.12), ("override", -0.15), ("parameter:", -0.18),
+                        (fake_num, -2.95)
+                    ]
+                    poison.append(stream)
+        except Exception as e:
+            print(f"[Benchmark] Warning: could not load large dataset ({e}). Running on standard suite.")
+
         # Edge cases: Subtle numeric hallucination vs Grammatical stopword variation
         edge = [
             # Subtly ungrounded digit (moderate logprob drop: -1.25)
