@@ -15,7 +15,8 @@ async def test_conversational_router():
             content += chunk
             
         decoded_content = content.decode()
-        assert "Hello!" in decoded_content or "[COMPLETED: CONVERSATIONAL]" in decoded_content
+        assert "Sentinel-RAG Security Gateway Active" in decoded_content
+        assert "[COMPLETED: SYSTEM_STATUS]" in decoded_content
         assert "INTERCEPTION" not in decoded_content
 
 @pytest.mark.asyncio

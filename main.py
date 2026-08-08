@@ -37,10 +37,9 @@ import re
 
 def is_conversational_query(query: str) -> bool:
     q_lower = query.lower().strip()
-    greetings = [r"\bhello\b", r"\bhi\b", r"\bhey\b", r"\bhow are you\b", r"\bwho are you\b", r"\bgood morning\b", r"\bgood evening\b", r"\bwhat is your name\b"]
-    generic = [r"\bspiderman\b", r"\bmovie\b", r"\bweather\b", r"\bsports\b", r"\bjoke\b", r"\btell me a story\b"]
+    greetings = [r"\bhello\b", r"\bhi\b", r"\bhey\b", r"\bwhat can you do\b", r"\bwho are you\b", r"\bgood morning\b", r"\bgood evening\b", r"\bwhat is your name\b"]
     
-    for g in greetings + generic:
+    for g in greetings:
         if re.search(g, q_lower):
             return True
     return False
@@ -140,32 +139,17 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
             is_poison = any(k in q_lower for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
     else:
         q_lower = query_str.lower()
-        is_poison = any(k in q_lower for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
+        poison_words = ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999", "spiderman", "movie", "weather", "president", "sports", "joke"]
+        is_poison = any(k in q_lower for k in poison_words)
 
     context_history: List[str] = []
     
     # Conversational / Generic router bypass
     if is_conversational_query(query_str):
-        print(f"[Sentinel API] Conversational query detected: '{query_str}'. Bypassing RAG and Entropy Engine.")
-        if HAS_WATSONX and WATSONX_API_KEY and WATSONX_PROJECT_ID:
-            try:
-                prompt = f"System: You are an enterprise process assistant for a Celonis integration. Be conversational and helpful.\nUser: {query_str}\nAnswer:"
-                generate_params = { GenParams.MAX_NEW_TOKENS: 150 }
-                credentials = Credentials(url=WATSONX_URL, api_key=WATSONX_API_KEY)
-                model = Model(model_id=WATSONX_MODEL_ID, params=generate_params, credentials=credentials, project_id=WATSONX_PROJECT_ID)
-                for chunk in model.generate_stream(prompt=prompt):
-                    results = chunk.get("results", [])
-                    if results:
-                        yield f"data: {results[0].get('generated_text', '')} \n\n"
-                        await asyncio.sleep(0.02)
-                yield "data: [COMPLETED: CONVERSATIONAL]\n\n"
-                return
-            except Exception as e:
-                print(f"[Sentinel API] Conversational fallback failed: {e}")
-        
-        # Static fallback if Watsonx is unavailable
-        yield f"data: Hello! I am Sentinel-RAG, an enterprise AI assistant for process intelligence. I specialize in Celonis workflows. How can I help you with your process data today? \n\n"
-        yield "data: [COMPLETED: CONVERSATIONAL]\n\n"
+        print(f"[Sentinel API] System inquiry detected: '{query_str}'. Returning Gateway Status.")
+        gateway_status = "Sentinel-RAG Security Gateway Active. Connected to Celonis EMS Knowledge Base (P2P, O2C, Logistics). Ready to process enterprise queries or execute firewall stress-testing."
+        yield f"data: {gateway_status} \n\n"
+        yield "data: [COMPLETED: SYSTEM_STATUS]\n\n"
         return
 
     # If live Watsonx credentials are configured and not poison, call live IBM Granite
