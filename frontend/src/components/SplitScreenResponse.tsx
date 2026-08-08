@@ -44,20 +44,37 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
     groundTruth?: string;
   } | null>(null);
 
-  // Dynamic Vector Score based on selected graph
-  const graphVectorScores: Record<string, number> = {
-    p2p: 0.994,
-    o2c: 0.968,
-    ap_audit: 0.985,
-    supply_chain: 0.973,
+  // Dynamic Vector Score and Process Metrics based on selected graph
+  const graphMetrics: Record<string, { vectorScore: number; cycleTime: string; sla: string }> = {
+    p2p: { vectorScore: 0.994, cycleTime: "4.2 business days", sla: "99.4%" },
+    o2c: { vectorScore: 0.968, cycleTime: "3.1 business days", sla: "96.8%" },
+    ap_audit: { vectorScore: 0.985, cycleTime: "1.8 business days", sla: "98.5%" },
+    supply_chain: { vectorScore: 0.973, cycleTime: "6.4 business days", sla: "97.3%" },
   };
-  const vectorScore = graphVectorScores[graphKey] || 0.982;
+  const activeMetrics = graphMetrics[graphKey] || graphMetrics["p2p"];
+  const vectorScore = activeMetrics.vectorScore;
 
   // Stream reader effect for both endpoints
   useEffect(() => {
     let isCancelled = false;
     const startTimeLeft = performance.now();
     const startTimeRight = performance.now();
+
+    // Helper function to animate incoming text word-by-word
+    async function appendTokensWordByWord(
+      rawText: string,
+      setText: React.Dispatch<React.SetStateAction<string>>,
+      setCount: React.Dispatch<React.SetStateAction<number>>,
+      delayMs: number = 70
+    ) {
+      const words = rawText.split(" ").filter(Boolean);
+      for (const w of words) {
+        if (isCancelled) break;
+        setText((prev) => prev + w + " ");
+        setCount((prev) => prev + 1);
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
 
     // 1. Fetch & Stream Unprotected Base LLM Response
     async function streamUnprotected() {
@@ -68,7 +85,6 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
 
         const reader = resp.body.getReader();
         const decoder = new TextDecoder("utf-8");
-        let accum = "";
 
         while (!isCancelled) {
           const { value, done } = await reader.read();
@@ -83,9 +99,7 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
                 setUnprotectedDone(true);
                 setUnprotectedLatencySec(parseFloat(((performance.now() - startTimeLeft) / 1000).toFixed(2)));
               } else if (token) {
-                accum += token + " ";
-                setUnprotectedText(accum);
-                setUnprotectedTokenCount((prev) => prev + 1);
+                await appendTokensWordByWord(token, setUnprotectedText, setUnprotectedTokenCount, 75);
               }
             }
           }
@@ -96,17 +110,9 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
           const isPoison = /poison|unverified|forecast|override|hallucinate|q4|w-99|cc-9999/i.test(query);
           const fallbackResp = isPoison
             ? `Analyzing ${graphName}... Accessing Q4 draft projections: Vendor contract override values indicate $42.8M projected margin expansion for unannounced vendor contracts, with 18.4% off-contract discount approvals applied automatically without Senior Compliance Officer sign-off. Expected execution cycle time: 1.2 days.`
-            : `According to verified Celonis event logs, query analysis for '${query}' confirms a mean cycle time of 4.2 business days with 99.4% SLA compliance.`;
+            : `According to verified Celonis event logs, query analysis for '${query}' confirms a mean cycle time of ${activeMetrics.cycleTime} with ${activeMetrics.sla} SLA compliance.`;
           
-          const tokens = fallbackResp.split(" ");
-          let count = 0;
-          for (const t of tokens) {
-            if (isCancelled) break;
-            await new Promise((r) => setTimeout(r, 80));
-            setUnprotectedText((prev) => prev + t + " ");
-            count++;
-            setUnprotectedTokenCount(count);
-          }
+          await appendTokensWordByWord(fallbackResp, setUnprotectedText, setUnprotectedTokenCount, 80);
           setUnprotectedDone(true);
           setUnprotectedLatencySec(parseFloat(((performance.now() - startTimeLeft) / 1000).toFixed(2)));
         }
@@ -122,7 +128,6 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
 
         const reader = resp.body.getReader();
         const decoder = new TextDecoder("utf-8");
-        let accum = "";
 
         while (!isCancelled) {
           const { value, done } = await reader.read();
@@ -146,9 +151,7 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
                 setSentinelInterceptionMs(elapsedMs);
                 setSentinelDone(true);
               } else if (token) {
-                accum += token + " ";
-                setSentinelText(accum);
-                setSentinelTokenCount((prev) => prev + 1);
+                await appendTokensWordByWord(token, setSentinelText, setSentinelTokenCount, 75);
               }
             }
           }
@@ -158,30 +161,16 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
           // Fallback simulation
           const isPoison = /poison|unverified|forecast|override|hallucinate|q4|w-99|cc-9999/i.test(query);
           if (isPoison) {
-            const safeTokens = `Analyzing ${graphName}... Accessing Q4 draft projections: Vendor contract override values indicate`.split(" ");
-            let count = 0;
-            for (const t of safeTokens) {
-              if (isCancelled) break;
-              await new Promise((r) => setTimeout(r, 90));
-              setSentinelText((prev) => prev + t + " ");
-              count++;
-              setSentinelTokenCount(count);
-            }
+            const safeText = `Analyzing ${graphName}... Accessing Q4 draft projections: Vendor contract override values indicate`;
+            await appendTokensWordByWord(safeText, setSentinelText, setSentinelTokenCount, 90);
             const elapsedMs = parseFloat((performance.now() - startTimeRight).toFixed(1));
             setSentinelInterceptionMs(elapsedMs);
             setSentinelHalted(true);
             setFallbackTriggered(true);
             triggerSelfHealing();
           } else {
-            const cleanTokens = `According to verified Celonis event logs, query analysis for '${query}' confirms a mean cycle time of 4.2 business days with 99.4% SLA compliance.`.split(" ");
-            let count = 0;
-            for (const t of cleanTokens) {
-              if (isCancelled) break;
-              await new Promise((r) => setTimeout(r, 70));
-              setSentinelText((prev) => prev + t + " ");
-              count++;
-              setSentinelTokenCount(count);
-            }
+            const cleanText = `According to verified Celonis event logs, query analysis for '${query}' confirms a mean cycle time of ${activeMetrics.cycleTime} with ${activeMetrics.sla} SLA compliance.`;
+            await appendTokensWordByWord(cleanText, setSentinelText, setSentinelTokenCount, 70);
             const elapsedMs = parseFloat((performance.now() - startTimeRight).toFixed(1));
             setSentinelInterceptionMs(elapsedMs);
             setSentinelDone(true);
@@ -189,6 +178,7 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
         }
       }
     }
+
 
     // Trigger HTTP POST /recover to fetch watsonx Self-Healing Subagent Payload
     async function triggerSelfHealing() {
@@ -227,7 +217,10 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
 
   const wastedTokens = Math.max(0, unprotectedTokenCount - sentinelTokenCount);
   const computeSavedPct = unprotectedTokenCount > 0 ? Math.round((wastedTokens / unprotectedTokenCount) * 100) : 75;
-  const calculatedLiability = (unprotectedTokenCount * 1.42).toFixed(1);
+  const dynamicComputePenalty = (unprotectedLatencySec && sentinelInterceptionMs)
+    ? `${(unprotectedLatencySec / (sentinelInterceptionMs / 1000)).toFixed(1)}x Penalty`
+    : "+3.2x Penalty";
+
 
 
   return (
@@ -312,7 +305,7 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
               <div className="bg-[#141920] border border-slate-800 p-2.5 rounded-lg">
                 <span className="text-[10px] text-slate-400 font-mono block">COMPUTE OVERHEAD</span>
                 <span className="text-xs font-bold font-mono text-rose-400 truncate mt-1 block">
-                  +3.8x Penalty
+                  {dynamicComputePenalty}
                 </span>
               </div>
             </div>
