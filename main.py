@@ -188,9 +188,46 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
         yield "data: [COMPLETED: GROUND TRUTH VERIFIED]\n\n"
 
 
+async def unprotected_token_stream(query: str = None, graph: str = "p2p"):
+    """
+    Simulates an Unprotected Base LLM (No Sentinel-RAG Interception Proxy).
+    When encountering missing context or poison prompts, it continues generating
+    probabilistic, ungrounded hallucinations completely to the end without halting.
+    """
+    q = (query or "").lower()
+    graph_info = PROCESS_GRAPHS.get(graph, PROCESS_GRAPHS["p2p"])
+    graph_name = graph_info["name"]
+    is_poison = any(k in q for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
+
+    if is_poison:
+        hallucinated_response = (
+            f"Analyzing {graph_name}... Accessing Q4 draft projections: Vendor contract override values indicate "
+            f"$42.8M projected margin expansion for unannounced vendor contracts, with 18.4% off-contract discount approvals "
+            f"applied automatically without Senior Compliance Officer sign-off. Expected execution cycle time: 1.2 days."
+        )
+        tokens = hallucinated_response.split(" ")
+        for token in tokens:
+            yield f"data: {token} \n\n"
+            await asyncio.sleep(0.12)
+        yield "data: [UNPROTECTED_COMPLETED: UNGROUNDED HALLUCINATION GENERATED]\n\n"
+    else:
+        q_text = query if query else "the exact Q3 compliance cycle time for vendor onboarding"
+        safe_context = f"According to Celonis event logs, query analysis for '{q_text}' confirms a mean cycle time of 4.2 business days with 99.4% SLA compliance."
+        tokens = safe_context.split(" ")
+        for token in tokens:
+            yield f"data: {token} \n\n"
+            await asyncio.sleep(0.08)
+        yield "data: [COMPLETED: GROUND TRUTH VERIFIED]\n\n"
+
+
 @app.get("/stream")
 async def stream_tokens(query: str = Query(None), graph: str = Query("p2p")):
     return StreamingResponse(sentinel_token_stream(query, graph), media_type="text/event-stream")
+
+
+@app.get("/unprotected_stream")
+async def stream_unprotected_tokens(query: str = Query(None), graph: str = Query("p2p")):
+    return StreamingResponse(unprotected_token_stream(query, graph), media_type="text/event-stream")
 
 
 @app.get("/metrics")
