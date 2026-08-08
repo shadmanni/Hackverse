@@ -219,7 +219,7 @@ def poll_backend_telemetry():
         "interception_latency_ms": 11.4,
         "milvus_status": "STANDALONE_MOCK",
         "milvus_host": "milvus-standalone:19530",
-        "circuit_breaker_tau": 0.420
+        "circuit_breaker_tau": 0.650
     }, False
 
 telemetry_data, is_live_backend = poll_backend_telemetry()
@@ -271,7 +271,7 @@ with st.sidebar:
     st.markdown("#### Active Guardrails")
     st.markdown("- **Engine:** IBM Granite-13B Chat")
     st.markdown(f"- **Interception Latency:** `{telemetry_data.get('interception_latency_ms', 11.4)} ms`")
-    st.markdown(f"- **Entropy Threshold (τ):** `{telemetry_data.get('circuit_breaker_tau', 0.420)}`")
+    st.markdown(f"- **Entropy Threshold (τ):** `{telemetry_data.get('circuit_breaker_tau', 0.650)}`")
     st.markdown("- **Ground Truth Source:** Celonis EMS")
 
     st.divider()

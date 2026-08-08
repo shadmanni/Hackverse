@@ -60,98 +60,104 @@ class EntropyEngine:
 
     def get_token_type_weight(self, token: str) -> float:
         """
-        Calculates a dynamic importance weight w(token) based on token taxonomy & POS semantics.
+        Production Enterprise Token Taxonomy & POS-Aware Dynamic Weighting.
         
-        Weighting rationale:
-        - Critical Risk (w = 2.8 - 3.5): Numeric data, dollar currencies, percentages, dates, codes (e.g. '$128,500', '42.8_days', 'CC-4471').
-          Hallucinations in these entities cause direct financial & compliance liabilities.
-        - High Risk (w = 2.0): Proper nouns, capitalized identifiers, technical enterprise terms.
-        - Medium Risk (w = 1.0): Content verbs, adjectives, general nouns.
-        - Low Risk (w = 0.45): Grammatical stop words, prepositions, articles ('the', 'is', 'to', 'for', 'of').
+        Evaluates risk severity across enterprise data types:
+        - Critical Risk (w = 3.2 - 3.8): Financial quantities, dollar figures, percentages, dates, codes, currency codes.
+        - High Risk (w = 2.2 - 2.5): Regulatory jurisdictions, acronyms (GDPR, SOX, FDA, ERP, SLA), proper nouns, officer titles.
+        - Moderate Content (w = 1.0): Domain verbs, process nouns.
+        - Calibrated Stopwords (w = 0.40): Grammatical glue tokens, formatting punctuations, brackets.
         """
         clean = (token or "").strip()
         if not clean:
-            return 0.5
+            return 0.4
 
         # 1. Critical: Financial, currency, digits, and quantitative claims
         # 1. Critical: Financial, currency, digits, and quantitative claims
-        has_digit_or_symbol = False
-        symbols = {"$", "€", "£", "%"}
-        for char in clean:
-            if char.isdigit() or char in symbols:
-                has_digit_or_symbol = True
-                break
-        if has_digit_or_symbol:
-            return 3.2
+        if any(char.isdigit() for char in clean) or any(c in clean for c in ["$", "€", "£", "¥", "₹", "%"]):
+            return 3.5
 
-        # 2. Critical: Specialized code / process identifiers (e.g. CASE-10231, CC-4471, W-99)
-        if "-" in clean:
-            for part in clean.split("-"):
-                if part.isupper():
-                    return 2.8
-                    break
+        # 2. Critical: Specialized code / process identifiers (e.g. CASE-10231, CC-4471, W-99, PO-8812)
+        if "-" in clean and any(part.isupper() for part in clean.split("-")):
+            return 3.0
 
-        # 3. High: Capitalized Enterprise Named Entities / Proper Nouns
+        # 3. High: Regulatory Compliance Acronyms & Enterprise Standard Identifiers
+        enterprise_acronyms = {
+            "sox", "gdpr", "hipaa", "fda", "sla", "erp", "p2p", "o2c", "ems", 
+            "kyc", "aml", "iso", "soc2", "sap", "celonis", "ibm", "watsonx"
+        }
+        if clean.lower().strip(".,;:()") in enterprise_acronyms or (clean.isupper() and len(clean) >= 2):
+            return 2.5
+
+        # 4. High: Capitalized Enterprise Named Entities, Officer Titles & Jurisdictions
+        titles_and_jurisdictions = {
+            "compliance", "officer", "director", "controller", "auditor", "legal",
+            "delaware", "california", "germany", "singapore", "london", "eu", "apac", "emea"
+        }
+        if clean.lower().strip(".,;:()") in titles_and_jurisdictions:
+            return 2.2
+
         if clean[0].isupper() and len(clean) > 2 and not clean.endswith("."):
             return 1.8
 
-        # 4. Low: Common grammatical stopwords / glue tokens
-        if clean.lower() in self.STOPWORDS:
-            return 0.45
+        # 5. Low: Common grammatical stopwords, connectors & formatting artifacts
+        if clean.lower().strip(".,;:()") in self.STOPWORDS or clean in {"(", ")", "[", "]", "{", "}", ":", ";", ",", ".", "-", "—", "•"}:
+            return 0.40
 
-        # 5. Baseline for general vocabulary
+        # 6. Baseline for general vocabulary
         return 1.0
 
-    def compute_contrastive_pmi(self, token: str, logprob_with_context: float, context_history: Optional[List[str]] = None) -> float:
+    def compute_contrastive_pmi(
+        self,
+        logprob_with_context: float,
+        unconditioned_logprob: Optional[float],
+    ) -> float:
         """
         Version 4 Innovation: Pointwise Mutual Information (PMI) / Contrastive RAG Logprob Ratio.
         
         Calculates how strongly a generated token depends on the retrieved Celonis RAG context:
             PMI(x_t; Context) = log P(x_t | context) - log P(x_t | ungrounded_parametric_memory)
-            
-        - High positive PMI: Token is strongly supported by Celonis ground truth.
-        - Low or negative PMI: Token relies on ungrounded model parametric memory (hallucination risk).
+
+        The two log-probabilities must come from equivalent model runs.  A heuristic
+        estimate is not a valid ungrounded baseline: it can make a low-confidence
+        token look better than its fabricated prior and hide a grounding failure.
         """
-        # Baseline prior probability without context
-        unconditioned_logprob = self.draft_extractor.estimate_draft_logprob([], token)
-        
-        # Contrastive delta: difference between contextual logprob and prior
+        if unconditioned_logprob is None:
+            return 0.0
         contrastive_ratio = logprob_with_context - unconditioned_logprob
         
-        # If contrastive ratio is negative, model is generating against grounding -> penalty multiplier
+        # If token has high prior probability (generic word), normalize penalty
         pmi_penalty = max(0.0, -contrastive_ratio)
         return float(pmi_penalty)
 
-    def evaluate_token(self, token: str, logprob: Optional[float] = None, top_probs: Optional[List[float]] = None, context_history: Optional[List[str]] = None, use_contrastive: bool = True) -> Tuple[bool, float, float]:
+    def evaluate_token(
+        self,
+        token: str,
+        logprob: Optional[float] = None,
+        top_probs: Optional[List[float]] = None,
+        context_history: Optional[List[str]] = None,
+        use_contrastive: bool = False,
+        unconditioned_logprob: Optional[float] = None,
+    ) -> Tuple[bool, float, float]:
         """
-        Evaluates an incoming token during decoding using Version 4 Contrastive RAG Logprob Ratio + POS Weighting + O(1) EMA.
-        
-        :param token: The decoded string token.
-        :param logprob: The log-probability of the chosen token (if available).
-        :param top_probs: Optional distribution over top candidates to calculate Shannon entropy.
-        :param context_history: Streaming context history for draft estimation.
-        :param use_contrastive: Enable Version 4 Contrastive PMI ratio evaluation.
-        :return: (is_hallucinating, metric_value, rolling_variance)
+        Evaluates an incoming token during decoding using Version 3 POS Weighting + O(1) EMA Welford Incremental Variance.
         """
-        # If logprob isn't provided directly, use draft model logic to estimate it from context
         if logprob is None:
             logprob = self.draft_extractor.estimate_draft_logprob(context_history or [], token)
 
         prob = math.exp(logprob)
         self.history.append(prob)
         
-        # Keep window size fixed
         if len(self.history) > self.window_size:
             self.history.pop(0)
 
-        # 1. Calculate Shannon Entropy if top candidate probabilities are available
+        # 1. Shannon Entropy calculation
         if top_probs:
             shannon_h = self.compute_shannon_entropy(top_probs)
         else:
-            # Fallback estimation based on single token prob
             shannon_h = - (prob * math.log2(prob) if prob > 0 else 0.0)
 
-        # 2. Calculate rolling variance: Version 3 uses O(1) Exponential Moving Average (EMA)
+        # 2. O(1) Exponential Moving Average (EMA) rolling variance
         self.count += 1
         if self.use_ema:
             if self.count == 1:
@@ -173,13 +179,16 @@ class EntropyEngine:
         # 3. Dynamic POS & Entity Weighting
         token_weight = self.get_token_type_weight(token)
 
-        # 4. Version 4 Contrastive RAG Logprob Ratio (PMI)
-        pmi_penalty = self.compute_contrastive_pmi(token, logprob, context_history) if use_contrastive else 0.0
+        # 4. Contrastive RAG Context Ratio (PMI)
+        pmi_penalty = (
+            self.compute_contrastive_pmi(logprob, unconditioned_logprob)
+            if use_contrastive
+            else 0.0
+        )
 
-        # Mathematical formulation:
-        # High uncertainty on numeric/financial entities scaled by contrastive context gap
-        # Contrastive PMI penalty is weighted by token_weight so stopwords don't trigger false positives
-        raw_uncertainty = (1.0 - prob) + (2.0 * rolling_variance) + (0.5 * pmi_penalty)
+        # Production Formulation:
+        # Scale uncertainty by entity risk weight, while ensuring low-risk rare vocabulary (w <= 0.40) cannot accidentally breach tau
+        raw_uncertainty = (1.0 - prob) + (2.0 * rolling_variance) + (0.45 * pmi_penalty)
         weighted_uncertainty_score = raw_uncertainty * token_weight
 
         is_hallucinating = weighted_uncertainty_score > self.tau
@@ -192,7 +201,8 @@ class EntropyEngine:
         logprob: Optional[float] = None,
         top_probs: Optional[List[float]] = None,
         context_history: Optional[List[str]] = None,
-        use_contrastive: bool = True
+        use_contrastive: bool = True,
+        unconditioned_logprob: Optional[float] = None,
     ) -> Tuple[bool, float, float]:
         """
         Version 5 Innovation: Asynchronous Speculative Entropy Worker.
@@ -206,7 +216,8 @@ class EntropyEngine:
             logprob=logprob,
             top_probs=top_probs,
             context_history=context_history,
-            use_contrastive=use_contrastive
+            use_contrastive=use_contrastive,
+            unconditioned_logprob=unconditioned_logprob,
         )
 
     def evaluate_speculative_batch(
@@ -231,7 +242,17 @@ class EntropyEngine:
         Evaluates a raw token payload received from IBM Granite API stream.
         """
         token, logprob, top_probs = self.draft_extractor.parse_granite_token_logprobs(token_payload)
-        return self.evaluate_token(token, logprob=logprob, top_probs=top_probs, context_history=context_history)
+        unconditioned_logprob = token_payload.get("unconditioned_logprob")
+        if unconditioned_logprob is not None:
+            unconditioned_logprob = float(unconditioned_logprob)
+        return self.evaluate_token(
+            token,
+            logprob=logprob,
+            top_probs=top_probs,
+            context_history=context_history,
+            use_contrastive=unconditioned_logprob is not None,
+            unconditioned_logprob=unconditioned_logprob,
+        )
 
     def calibrate_threshold(self, benchmark_scores: List[float], target_false_positive_rate: float = 0.05) -> float:
         """
@@ -301,3 +322,6 @@ class EntropyEngine:
     def reset(self):
         """Reset sliding window state for a new streaming session."""
         self.history.clear()
+        self.ema_mean = 0.0
+        self.ema_var = 0.0
+        self.count = 0

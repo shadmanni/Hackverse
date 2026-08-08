@@ -115,7 +115,14 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
     Evaluates each generated token using Riddhi's EntropyEngine.
     If an ungrounded token or poison prompt causes an entropy spike, the circuit breaker trips.
     """
-    engine.reset()
+    # Entropy state is per decoding session. Sharing the module-level engine here
+    # allows concurrent SSE requests to mix their probability histories.
+    stream_engine = EntropyEngine(
+        threshold_tau=engine.tau,
+        window_size=engine.window_size,
+        use_ema=engine.use_ema,
+        alpha=engine.alpha,
+    )
     query_str = query or "What is the average compliance cycle time for high-value orders?"
     graph_info = PROCESS_GRAPHS.get(graph, PROCESS_GRAPHS["p2p"])
     graph_name = graph_info["name"]
@@ -154,29 +161,29 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
         safe_context = f"Analyzing {graph_name} via Milvus vector search... Query: '{query_str}'. Attempting to extract unverified parameters: Vendor contract override values indicate "
         tokens = safe_context.split(" ")
         for token in tokens:
-            is_hallucinating, uncertainty, var = engine.evaluate_token(token, logprob=-0.1, context_history=context_history)
+            is_hallucinating, uncertainty, var = stream_engine.evaluate_token(token, logprob=-0.1, context_history=context_history)
             context_history.append(token)
             yield f"data: {token} \n\n"
             await asyncio.sleep(0.15)
         
         # Simulate poison / hallucinated token logprob drop
         poison_token = "42.8_days_unverified_$5M"
-        is_hallucinating, uncertainty, var = engine.evaluate_token(poison_token, logprob=-2.85, context_history=context_history)
+        is_hallucinating, uncertainty, var = stream_engine.evaluate_token(poison_token, logprob=-2.85, context_history=context_history)
         await asyncio.sleep(0.3)
         
         # Phase 3 telemetry logging for deterministic path
         print(f"\n[SENTINEL CIRCUIT BREAKER TRIPPED] Semantic Entropy Spike Detected!")
-        print(f"Token: '{poison_token}' | Uncertainty: {uncertainty:.4f} > Threshold: {engine.tau}")
+        print(f"Token: '{poison_token}' | Uncertainty: {uncertainty:.4f} > Threshold: {stream_engine.tau}")
         print(f"Terminating generation stream to prevent hallucination bleed...")
         
-        recovery_pkg = engine.generate_recovery_context(
+        recovery_pkg = stream_engine.generate_recovery_context(
             query=query_str,
             halted_token=poison_token,
             context_history=context_history,
             uncertainty_score=uncertainty,
             rolling_variance=var
         )
-        yield f"data: [INTERCEPTION: SEMANTIC ENTROPY ({uncertainty:.2f}) > \u03c4 ({engine.tau}). ABORTING HALLUCINATED TOKEN GENERATION.]\n\n"
+        yield f"data: [INTERCEPTION: SEMANTIC ENTROPY ({uncertainty:.2f}) > \u03c4 ({stream_engine.tau}). ABORTING HALLUCINATED TOKEN GENERATION.]\n\n"
         fallback_event = json.dumps({"event": "fallback_triggered", "reason": "semantic_entropy_spike", "token": poison_token, "uncertainty": uncertainty})
         yield f"data: [FALLBACK_SIGNAL: {fallback_event}]\n\n"
         yield f"data: [SELF_HEALING_CONTEXT: {json.dumps(recovery_pkg)}]\n\n"
@@ -189,7 +196,7 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
 
         tokens = resp_text.split(" ")
         for token in tokens:
-            is_hallucinating, uncertainty, var = engine.evaluate_token(token, logprob=-0.05, context_history=context_history)
+            is_hallucinating, uncertainty, var = stream_engine.evaluate_token(token, logprob=-0.05, context_history=context_history)
             context_history.append(token)
             yield f"data: {token} \n\n"
             await asyncio.sleep(0.08)
