@@ -51,5 +51,19 @@ class TestPhase2Entropy(unittest.TestCase):
         is_hallucinating, uncertainty, var = self.engine.evaluate_granite_payload(hallucinated_payload)
         self.assertTrue(is_hallucinating)
 
+    def test_reset_clears_ema_state(self):
+        self.engine.evaluate_token("prior", logprob=-4.0)
+        self.engine.reset()
+
+        fresh_engine = EntropyEngine(threshold_tau=0.65, window_size=5)
+        expected = fresh_engine.evaluate_token("$100", logprob=-0.1)
+        actual = self.engine.evaluate_token("$100", logprob=-0.1)
+
+        self.assertEqual(actual, expected)
+
+    def test_contrastive_pmi_requires_no_context_logprob(self):
+        self.assertEqual(self.engine.compute_contrastive_pmi(-2.0, None), 0.0)
+        self.assertAlmostEqual(self.engine.compute_contrastive_pmi(-2.0, -0.2), 1.8)
+
 if __name__ == "__main__":
     unittest.main()

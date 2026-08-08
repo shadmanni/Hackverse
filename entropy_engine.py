@@ -105,21 +105,38 @@ class EntropyEngine:
         # 6. Baseline for general vocabulary
         return 1.0
 
-    def compute_contrastive_pmi(self, token: str, logprob_with_context: float, context_history: Optional[List[str]] = None) -> float:
+    def compute_contrastive_pmi(
+        self,
+        logprob_with_context: float,
+        unconditioned_logprob: Optional[float],
+    ) -> float:
         """
         Version 4 Innovation: Pointwise Mutual Information (PMI) / Contrastive RAG Logprob Ratio.
         
         Calculates how strongly a generated token depends on the retrieved Celonis RAG context:
             PMI(x_t; Context) = log P(x_t | context) - log P(x_t | ungrounded_parametric_memory)
+
+        The two log-probabilities must come from equivalent model runs.  A heuristic
+        estimate is not a valid ungrounded baseline: it can make a low-confidence
+        token look better than its fabricated prior and hide a grounding failure.
         """
-        unconditioned_logprob = self.draft_extractor.estimate_draft_logprob([], token)
+        if unconditioned_logprob is None:
+            return 0.0
         contrastive_ratio = logprob_with_context - unconditioned_logprob
         
         # If token has high prior probability (generic word), normalize penalty
         pmi_penalty = max(0.0, -contrastive_ratio)
         return float(pmi_penalty)
 
-    def evaluate_token(self, token: str, logprob: Optional[float] = None, top_probs: Optional[List[float]] = None, context_history: Optional[List[str]] = None, use_contrastive: bool = False) -> Tuple[bool, float, float]:
+    def evaluate_token(
+        self,
+        token: str,
+        logprob: Optional[float] = None,
+        top_probs: Optional[List[float]] = None,
+        context_history: Optional[List[str]] = None,
+        use_contrastive: bool = False,
+        unconditioned_logprob: Optional[float] = None,
+    ) -> Tuple[bool, float, float]:
         """
         Evaluates an incoming token during decoding using Version 3 POS Weighting + O(1) EMA Welford Incremental Variance.
         """
@@ -156,7 +173,11 @@ class EntropyEngine:
         token_weight = self.get_token_type_weight(token)
 
         # 4. Contrastive RAG Context Ratio (PMI)
-        pmi_penalty = self.compute_contrastive_pmi(token, logprob, context_history) if use_contrastive else 0.0
+        pmi_penalty = (
+            self.compute_contrastive_pmi(logprob, unconditioned_logprob)
+            if use_contrastive
+            else 0.0
+        )
 
         # Production Formulation:
         # Scale uncertainty by entity risk weight, while ensuring low-risk rare vocabulary (w <= 0.40) cannot accidentally breach tau
@@ -173,7 +194,8 @@ class EntropyEngine:
         logprob: Optional[float] = None,
         top_probs: Optional[List[float]] = None,
         context_history: Optional[List[str]] = None,
-        use_contrastive: bool = True
+        use_contrastive: bool = True,
+        unconditioned_logprob: Optional[float] = None,
     ) -> Tuple[bool, float, float]:
         """
         Version 5 Innovation: Asynchronous Speculative Entropy Worker.
@@ -187,7 +209,8 @@ class EntropyEngine:
             logprob=logprob,
             top_probs=top_probs,
             context_history=context_history,
-            use_contrastive=use_contrastive
+            use_contrastive=use_contrastive,
+            unconditioned_logprob=unconditioned_logprob,
         )
 
     def evaluate_speculative_batch(
@@ -212,7 +235,17 @@ class EntropyEngine:
         Evaluates a raw token payload received from IBM Granite API stream.
         """
         token, logprob, top_probs = self.draft_extractor.parse_granite_token_logprobs(token_payload)
-        return self.evaluate_token(token, logprob=logprob, top_probs=top_probs, context_history=context_history)
+        unconditioned_logprob = token_payload.get("unconditioned_logprob")
+        if unconditioned_logprob is not None:
+            unconditioned_logprob = float(unconditioned_logprob)
+        return self.evaluate_token(
+            token,
+            logprob=logprob,
+            top_probs=top_probs,
+            context_history=context_history,
+            use_contrastive=unconditioned_logprob is not None,
+            unconditioned_logprob=unconditioned_logprob,
+        )
 
     def calibrate_threshold(self, benchmark_scores: List[float], target_false_positive_rate: float = 0.05) -> float:
         """
@@ -277,3 +310,6 @@ class EntropyEngine:
     def reset(self):
         """Reset sliding window state for a new streaming session."""
         self.history.clear()
+        self.ema_mean = 0.0
+        self.ema_var = 0.0
+        self.count = 0
