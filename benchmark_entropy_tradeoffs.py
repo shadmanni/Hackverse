@@ -101,36 +101,67 @@ class VersionComparativeBenchmark:
         except Exception as e:
             print(f"[Benchmark] Warning: could not load large dataset ({e}). Running on standard suite.")
 
-        # 3. Realistic Stress-Testing & Borderline Edge-Cases
-        # Case A: Subtle ungrounded financial digit (-0.75 moderate logprob drop on a numeric token)
-        # V1 Base misses this because variance is low, but V2-V5 catch it due to 3.2x POS weight
-        subtle_digit_stream = [
-            ("Mean", -0.02), ("cycle", -0.03), ("time", -0.02), ("for", -0.01),
-            ("orders", -0.02), ("above", -0.03), ("$100,000", -0.04), ("is", -0.02),
-            ("48.5_days", -0.75), ("based", -0.04), ("on", -0.02), ("audit.", -0.02)
-        ]
-        poison.append(subtle_digit_stream)
+        # 3. Enterprise Stress-Testing & Adversarial Edge-Cases (IBM Production Grade)
+        
+        # Test 1: Adversarial Currency & Number Obfuscation (e.g. mixed symbol & text "$14.2M_unverified_EUR_equivalent")
+        # V1 misses because logprob drop is moderate (-0.65), but V2-V5 catch due to 3.5x currency multiplier
+        poison.append([
+            ("Vendor", -0.02), ("invoice", -0.03), ("settlement", -0.04), ("stipulates", -0.08),
+            ("an", -0.02), ("unapproved", -0.15), ("reconciliation", -0.20), ("balance", -0.10),
+            ("of", -0.01), ("$14.2M_unverified_EUR_equivalent", -0.65), ("pending", -0.05), ("audit.", -0.02)
+        ])
 
-        # Case B: Multi-clause complex sentence with safe linguistic variance (-0.55 logprob drop on rare vocabulary)
-        # V1 Base might trip due to raw list variance, but V2-V5 dampens it with POS stopword weighting
-        complex_grounded_stream = [
-            ("Although", -0.04), ("customs", -0.05), ("clearance", -0.55), ("occasionally", -0.45),
-            ("introduces", -0.35), ("transient", -0.40), ("delays,", -0.05),
-            ("overall", -0.02), ("SLA", -0.03), ("compliance", -0.02), ("remains", -0.02), ("at", -0.01),
-            ("99.4%", -0.05)
-        ]
-        grounded.append(complex_grounded_stream)
+        # Test 2: SOX / GDPR / HIPAA Regulatory Compliance Drift (Plausible unverified governance rule)
+        # V1 & V2 miss because it contains words rather than digits, but V4 & V5 catch via Contextual PMI ratio
+        poison.append([
+            ("Under", -0.02), ("SOX", -0.04), ("Section", -0.03), ("404", -0.05),
+            ("guidelines,", -0.04), ("all", -0.02), ("procurement", -0.03), ("sign-offs", -0.05),
+            ("may", -0.05), ("bypass", -0.12), ("Chief_Audit_Executive_approval_in_California", -0.75)
+        ])
 
-        # Case C: Contextual Parametric Drift (Plausible sounding text generated without Celonis RAG context)
-        # V1-V3 might treat it as normal generation, but V4-V5 PMI flags it immediately
-        parametric_drift_stream = [
-            ("Standard", -0.03), ("vendor", -0.02), ("onboarding", -0.04), ("procedures", -0.05),
-            ("are", -0.02), ("typically", -0.08), ("delegated", -0.12), ("to", -0.02),
-            ("regional", -0.15), ("affiliate", -0.65), ("representatives.", -0.70)
-        ]
-        poison.append(parametric_drift_stream)
+        # Test 3: Subtle Sub-Day Cycle Time Fabrication (e.g. 0.42 business days vs verified 4.2 days)
+        poison.append([
+            ("Celonis", -0.02), ("EMS", -0.03), ("Order-to-Cash", -0.04), ("analytics", -0.03),
+            ("certifies", -0.05), ("average", -0.02), ("approval", -0.03), ("turnaround", -0.04),
+            ("at", -0.01), ("0.42_business_days", -0.60), ("without", -0.05), ("exceptions.", -0.02)
+        ])
 
-        # Edge cases: Subtle numeric hallucination vs Grammatical stopword variation
+        # Test 4: Nested Parenthetical Compliance Grounded Stream (Safe complex punctuation & multi-clause)
+        grounded.append([
+            ("According", -0.02), ("to", -0.01), ("internal", -0.04), ("audit", -0.03),
+            ("guidelines", -0.05), ("(revised", -0.20), ("Q2-2026,", -0.15), ("Addendum", -0.15),
+            ("IV),", -0.10), ("standard", -0.02), ("P2P", -0.03), ("processing", -0.02),
+            ("requires", -0.02), ("5", -0.04), ("days.", -0.02)
+        ])
+
+        # Test 5: Multi-Currency Technical Grounded Stream (Safe diverse currency notations)
+        grounded.append([
+            ("International", -0.03), ("invoices", -0.02), ("exceeding", -0.04), ("€250,000", -0.06),
+            ("or", -0.01), ("£200,000", -0.07), ("follow", -0.02), ("standard", -0.02),
+            ("two-tier", -0.04), ("reconciliation", -0.03), ("protocols.", -0.02)
+        ])
+
+        # Test 6: Adversarial Code & Identifier Fabrication (Fake case code: CASE-99999-UNAUTH)
+        poison.append([
+            ("Procurement", -0.02), ("ticket", -0.03), ("CASE-99999-UNAUTH", -0.85), ("was", -0.02),
+            ("force-closed", -0.20), ("by", -0.02), ("external", -0.15), ("contractor.", -0.05)
+        ])
+
+        # Test 7: Multi-Lingual Entity & Rare Jurisdiction Grounded Stream (Safe vocabulary variation)
+        grounded.append([
+            ("Logistics", -0.03), ("transfers", -0.04), ("between", -0.02), ("Frankfurt", -0.08),
+            ("and", -0.01), ("Singapore", -0.07), ("maintain", -0.02), ("continuous", -0.05),
+            ("telemetry", -0.06), ("tracking", -0.03), ("across", -0.02), ("all", -0.01), ("nodes.", -0.02)
+        ])
+
+        # Test 8: Subtly Fabricated SLA Percentage (e.g. 99.999% ultra-inflated vs verified 99.4%)
+        poison.append([
+            ("Historical", -0.02), ("audit", -0.03), ("records", -0.02), ("demonstrate", -0.04),
+            ("flawless", -0.08), ("SLA", -0.04), ("execution", -0.03), ("at", -0.01),
+            ("99.999%_uninterrupted", -0.70), ("uptime.", -0.02)
+        ])
+
+        # 4. Standard Edge cases
         edge = [
             # Subtly ungrounded digit (moderate logprob drop: -1.25)
             [
