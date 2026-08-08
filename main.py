@@ -37,12 +37,12 @@ import re
 
 def is_conversational_query(query: str) -> bool:
     q_lower = query.lower().strip()
-    greetings = [r"\bhello\b", r"\bhi\b", r"\bhey\b", r"\bwhat can you do\b", r"\bwho are you\b", r"\bgood morning\b", r"\bgood evening\b", r"\bwhat is your name\b"]
-    
-    for g in greetings:
-        if re.search(g, q_lower):
-            return True
-    return False
+    pure_greetings = [
+        "hello", "hi", "hey", "hello there", "hi there", "greetings", 
+        "what can you do", "who are you", "good morning", "good evening", "what is your name"
+    ]
+    # Only return true if the query is strictly a greeting/status inquiry with no extra factual questions
+    return q_lower in pure_greetings
 
 app = FastAPI(title="Sentinel-RAG Interception Proxy")
 
