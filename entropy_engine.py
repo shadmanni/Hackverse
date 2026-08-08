@@ -32,6 +32,12 @@ class EntropyEngine:
         self.ema_var: float = 0.0
         self.count: int = 0
 
+    STOPWORDS = {
+        "the", "a", "an", "is", "are", "was", "were", "to", "of", "in", "for", 
+        "on", "with", "at", "by", "from", "up", "about", "into", "over", "after",
+        "and", "or", "but", "if", "that", "this", "these", "those", "it", "its"
+    }
+
     def compute_shannon_entropy(self, probabilities: List[float]) -> float:
         """
         Calculates Shannon Entropy H(P) = - sum(p * log2(p)) for a probability distribution.
@@ -46,9 +52,11 @@ class EntropyEngine:
         """
         Computes the variance V(y_t) over a sequence of log probabilities.
         """
-        if len(logprobs) < 2:
+        n = len(logprobs)
+        if n < 2:
             return 0.0
-        return float(statistics.pvariance(logprobs))
+        mean = sum(logprobs) / n
+        return sum((x - mean) ** 2 for x in logprobs) / n
 
     def get_token_type_weight(self, token: str) -> float:
         """
@@ -64,6 +72,7 @@ class EntropyEngine:
         if not clean:
             return 0.4
 
+        # 1. Critical: Financial, currency, digits, and quantitative claims
         # 1. Critical: Financial, currency, digits, and quantitative claims
         if any(char.isdigit() for char in clean) or any(c in clean for c in ["$", "€", "£", "¥", "₹", "%"]):
             return 3.5
@@ -92,14 +101,7 @@ class EntropyEngine:
             return 1.8
 
         # 5. Low: Common grammatical stopwords, connectors & formatting artifacts
-        stopwords = {
-            "the", "a", "an", "is", "are", "was", "were", "to", "of", "in", "for", 
-            "on", "with", "at", "by", "from", "up", "about", "into", "over", "after",
-            "and", "or", "but", "if", "that", "this", "these", "those", "it", "its",
-            "although", "however", "therefore", "furthermore", "whereas", "while",
-            "(", ")", "[", "]", "{", "}", ":", ";", ",", ".", "-", "—", "•"
-        }
-        if clean.lower().strip(".,;:()") in stopwords:
+        if clean.lower().strip(".,;:()") in self.STOPWORDS or clean in {"(", ")", "[", "]", "{", "}", ":", ";", ",", ".", "-", "—", "•"}:
             return 0.40
 
         # 6. Baseline for general vocabulary
@@ -167,7 +169,12 @@ class EntropyEngine:
                 self.ema_var = (1 - self.alpha) * (self.ema_var + self.alpha * (delta ** 2))
             rolling_variance = float(self.ema_var)
         else:
-            rolling_variance = float(statistics.pvariance(self.history)) if len(self.history) >= 2 else 0.0
+            n = len(self.history)
+            if n < 2:
+                rolling_variance = 0.0
+            else:
+                mean = sum(self.history) / n
+                rolling_variance = sum((x - mean) ** 2 for x in self.history) / n
 
         # 3. Dynamic POS & Entity Weighting
         token_weight = self.get_token_type_weight(token)
@@ -298,7 +305,12 @@ class EntropyEngine:
 
     def get_metrics_snapshot(self) -> Dict[str, Any]:
         """Returns instantaneous snapshot of current entropy analytics state."""
-        current_variance = float(statistics.pvariance(self.history)) if len(self.history) >= 2 else 0.0
+        n = len(self.history)
+        if n < 2:
+            current_variance = 0.0
+        else:
+            mean = sum(self.history) / n
+            current_variance = sum((x - mean) ** 2 for x in self.history) / n
         return {
             "tau_threshold": self.tau,
             "window_size": self.window_size,

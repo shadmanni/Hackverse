@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+:root {
+  --background: #080a0c;
+  --foreground: #f3f4f6;
+}
+
+body {
+  background-color: #080a0c;
+  color: #f3f4f6;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  overflow-x: hidden;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0d1117;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #21262d;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #30363d;
+}
+
+/* Custom Animation Utilities */
+@keyframes pulse-slow {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.96); }
+}
+
+.animate-pulse-slow {
+  animation: pulse-slow 3s infinite ease-in-out;
+}
+
+@keyframes scanline {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(1000%); }
+}
+
+.scanline-effect {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(225, 29, 72, 0.4), transparent);
+  animation: scanline 8s infinite linear;
+  pointer-events: none;
+}

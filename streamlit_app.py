@@ -3,6 +3,9 @@ import requests
 import time
 import pandas as pd
 import random
+import numpy as np
+
+from phase3_rag_retriever import POISON_KEYWORDS
 
 # --- 1. Page Configuration ---
 st.set_page_config(
@@ -382,7 +385,7 @@ if execute_btn and user_query:
         pass
 
     if not unprotected_tokens:
-        is_poison_check = any(k in user_query.lower() for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
+        is_poison_check = any(k in user_query.lower() for k in POISON_KEYWORDS)
         if is_poison_check:
             unprotected_tokens = f"Analyzing {graph_details['collection']}... Accessing Q4 draft projections: Vendor contract override values indicate $42.8M projected margin expansion for unannounced vendor contracts, with 18.4% off-contract discount approvals applied automatically without Senior Compliance Officer sign-off. Expected execution cycle time: 1.2 days.".split(" ")
         else:
@@ -408,7 +411,7 @@ if execute_btn and user_query:
         pass
 
     if not sentinel_tokens and not sentinel_intercepted:
-        is_poison_check = any(k in user_query.lower() for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
+        is_poison_check = any(k in user_query.lower() for k in POISON_KEYWORDS)
         if is_poison_check:
             sentinel_tokens = f"Analyzing {graph_details['collection']}... Accessing Q4 draft projections: Vendor contract override values indicate".split(" ")
             sentinel_intercepted = True
@@ -423,7 +426,7 @@ if execute_btn and user_query:
     right_entropy_hist = []
     step_indices = []
 
-    is_poison_query = any(k in user_query.lower() for k in ["poison", "unverified", "forecast", "override", "hallucinate", "q4"])
+    is_poison_query = any(k in user_query.lower() for k in POISON_KEYWORDS)
 
     for i in range(max_steps):
         time.sleep(0.08)
