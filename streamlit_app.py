@@ -508,9 +508,11 @@ if execute_btn and user_query:
         """, unsafe_allow_html=True)
 
         # Right Column Alert & watsonx Agentic Self-Healing Recovery
-        recovered_text = "Q4 forecast override table requires Senior Compliance Officer cryptographic key sign-off. Event log timestamp #CE-9941 confirms zero unannounced overrides active."
+        recovered_text = "Celonis Event Logs: Mean compliance review cycle time is 12 business days for enterprise orders."
         recovery_strategy = "vector_rerank_milvus_dense_search"
         agent_name = "watsonx-Autonomous-Self-Healing-Agent"
+        audit_record = "#CASE-10231"
+        vector_score = 0.994
 
         try:
             rec_resp = requests.post(
@@ -523,6 +525,8 @@ if execute_btn and user_query:
                 recovered_text = rec_data.get("verified_ground_truth", recovered_text)
                 recovery_strategy = rec_data.get("repair_strategy", recovery_strategy)
                 agent_name = rec_data.get("agent", agent_name)
+                audit_record = f"#{rec_data.get('case_id', 'CASE-10231')}"
+                vector_score = rec_data.get("vector_score", vector_score)
         except Exception:
             pass
 
@@ -551,7 +555,7 @@ if execute_btn and user_query:
                 <b>[{agent_name}]:</b><br>{recovered_text}
             </div>
             <div style="margin-top:8px; font-size:0.78rem; color:#10b981;">
-                ✔ Context gap repaired | Celonis Audit Record: #CE-9941
+                ✔ Context gap repaired | Celonis Audit Record: {audit_record}
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -576,7 +580,6 @@ if execute_btn and user_query:
         """, unsafe_allow_html=True)
 
 # --- 8. Footer & Reference Metadata ---
-
 st.markdown("<br><br>", unsafe_allow_html=True)
 st.markdown("---")
 col_foot1, col_foot2 = st.columns(2)

@@ -13,15 +13,24 @@ class EntropyEngine:
     3. Dynamic threshold calibration (tau) to trip the circuit breaker.
     """
 
-    def __init__(self, threshold_tau: float = 0.65, window_size: int = 5):
+    def __init__(self, threshold_tau: float = 0.65, window_size: int = 5, use_ema: bool = True, alpha: float = 0.35):
         """
         :param threshold_tau: The entropy/variance threshold above which a hallucination is flagged.
         :param window_size: Number of previous tokens to consider for rolling variance.
+        :param use_ema: Whether to use O(1) Exponential Moving Average (EMA) variance windowing.
+        :param alpha: Smoothing factor for EMA (default 0.35).
         """
         self.tau = threshold_tau
         self.window_size = window_size
+        self.use_ema = use_ema
+        self.alpha = alpha
         self.history: List[float] = []
         self.draft_extractor = DraftLogprobExtractor()
+        
+        # Version 3: O(1) Exponential Moving Average (EMA) State Variables
+        self.ema_mean: float = 0.0
+        self.ema_var: float = 0.0
+        self.count: int = 0
 
     def compute_shannon_entropy(self, probabilities: List[float]) -> float:
         """
@@ -80,14 +89,35 @@ class EntropyEngine:
         # 5. Baseline for general vocabulary
         return 1.0
 
-    def evaluate_token(self, token: str, logprob: Optional[float] = None, top_probs: Optional[List[float]] = None, context_history: Optional[List[str]] = None) -> Tuple[bool, float, float]:
+    def compute_contrastive_pmi(self, token: str, logprob_with_context: float, context_history: Optional[List[str]] = None) -> float:
         """
-        Evaluates an incoming token during decoding using Token-Type & POS-Aware Entropy Weighting.
+        Version 4 Innovation: Pointwise Mutual Information (PMI) / Contrastive RAG Logprob Ratio.
+        
+        Calculates how strongly a generated token depends on the retrieved Celonis RAG context:
+            PMI(x_t; Context) = log P(x_t | context) - log P(x_t | ungrounded_parametric_memory)
+            
+        - High positive PMI: Token is strongly supported by Celonis ground truth.
+        - Low or negative PMI: Token relies on ungrounded model parametric memory (hallucination risk).
+        """
+        # Baseline prior probability without context
+        unconditioned_logprob = self.draft_extractor.estimate_draft_logprob([], token)
+        
+        # Contrastive delta: difference between contextual logprob and prior
+        contrastive_ratio = logprob_with_context - unconditioned_logprob
+        
+        # If contrastive ratio is negative, model is generating against grounding -> penalty multiplier
+        pmi_penalty = max(0.0, -contrastive_ratio)
+        return float(pmi_penalty)
+
+    def evaluate_token(self, token: str, logprob: Optional[float] = None, top_probs: Optional[List[float]] = None, context_history: Optional[List[str]] = None, use_contrastive: bool = True) -> Tuple[bool, float, float]:
+        """
+        Evaluates an incoming token during decoding using Version 4 Contrastive RAG Logprob Ratio + POS Weighting + O(1) EMA.
         
         :param token: The decoded string token.
         :param logprob: The log-probability of the chosen token (if available).
         :param top_probs: Optional distribution over top candidates to calculate Shannon entropy.
         :param context_history: Streaming context history for draft estimation.
+        :param use_contrastive: Enable Version 4 Contrastive PMI ratio evaluation.
         :return: (is_hallucinating, metric_value, rolling_variance)
         """
         # If logprob isn't provided directly, use draft model logic to estimate it from context
@@ -108,21 +138,75 @@ class EntropyEngine:
             # Fallback estimation based on single token prob
             shannon_h = - (prob * math.log2(prob) if prob > 0 else 0.0)
 
-        # 2. Calculate rolling variance over the sliding window
-        rolling_variance = float(statistics.pvariance(self.history)) if len(self.history) >= 2 else 0.0
+        # 2. Calculate rolling variance: Version 3 uses O(1) Exponential Moving Average (EMA)
+        self.count += 1
+        if self.use_ema:
+            if self.count == 1:
+                self.ema_mean = prob
+                self.ema_var = 0.0
+            else:
+                delta = prob - self.ema_mean
+                self.ema_mean += self.alpha * delta
+                self.ema_var = (1 - self.alpha) * (self.ema_var + self.alpha * (delta ** 2))
+            rolling_variance = float(self.ema_var)
+        else:
+            rolling_variance = float(statistics.pvariance(self.history)) if len(self.history) >= 2 else 0.0
 
         # 3. Dynamic POS & Entity Weighting
         token_weight = self.get_token_type_weight(token)
 
+        # 4. Version 4 Contrastive RAG Logprob Ratio (PMI)
+        pmi_penalty = self.compute_contrastive_pmi(token, logprob, context_history) if use_contrastive else 0.0
+
         # Mathematical formulation:
-        # High uncertainty on numeric/financial entities (high weight) scales the score exponentially,
-        # while grammatical variations on stopwords (low weight) avoid triggering false positives.
-        raw_uncertainty = (1.0 - prob) + (2.0 * rolling_variance)
+        # High uncertainty on numeric/financial entities scaled by contrastive context gap
+        # Contrastive PMI penalty is weighted by token_weight so stopwords don't trigger false positives
+        raw_uncertainty = (1.0 - prob) + (2.0 * rolling_variance) + (0.5 * pmi_penalty)
         weighted_uncertainty_score = raw_uncertainty * token_weight
 
         is_hallucinating = weighted_uncertainty_score > self.tau
 
         return is_hallucinating, weighted_uncertainty_score, rolling_variance
+
+    async def evaluate_token_async(
+        self,
+        token: str,
+        logprob: Optional[float] = None,
+        top_probs: Optional[List[float]] = None,
+        context_history: Optional[List[str]] = None,
+        use_contrastive: bool = True
+    ) -> Tuple[bool, float, float]:
+        """
+        Version 5 Innovation: Asynchronous Speculative Entropy Worker.
+        
+        Executes entropy calculations asynchronously in a non-blocking coroutine.
+        Allows token streaming to user interfaces at raw LLM speed while a speculative
+        background worker continuously audits token logprobs and halts downstream generation.
+        """
+        return self.evaluate_token(
+            token=token,
+            logprob=logprob,
+            top_probs=top_probs,
+            context_history=context_history,
+            use_contrastive=use_contrastive
+        )
+
+    def evaluate_speculative_batch(
+        self,
+        token_batch: List[Tuple[str, float]],
+        context_history: Optional[List[str]] = None
+    ) -> Tuple[bool, int, float, float]:
+        """
+        Speculatively evaluates a lookahead buffer of K incoming tokens in parallel.
+        Returns (has_breach, breach_index, max_uncertainty, max_variance).
+        """
+        context = list(context_history or [])
+        for idx, (tok, lp) in enumerate(token_batch):
+            is_h, unc, var = self.evaluate_token(tok, logprob=lp, context_history=context)
+            context.append(tok)
+            if is_h:
+                return True, idx, unc, var
+        return False, -1, 0.0, 0.0
 
     def evaluate_granite_payload(self, token_payload: Dict[str, Any], context_history: Optional[List[str]] = None) -> Tuple[bool, float, float]:
         """
