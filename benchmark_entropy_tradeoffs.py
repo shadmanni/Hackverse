@@ -101,6 +101,35 @@ class VersionComparativeBenchmark:
         except Exception as e:
             print(f"[Benchmark] Warning: could not load large dataset ({e}). Running on standard suite.")
 
+        # 3. Realistic Stress-Testing & Borderline Edge-Cases
+        # Case A: Subtle ungrounded financial digit (-0.75 moderate logprob drop on a numeric token)
+        # V1 Base misses this because variance is low, but V2-V5 catch it due to 3.2x POS weight
+        subtle_digit_stream = [
+            ("Mean", -0.02), ("cycle", -0.03), ("time", -0.02), ("for", -0.01),
+            ("orders", -0.02), ("above", -0.03), ("$100,000", -0.04), ("is", -0.02),
+            ("48.5_days", -0.75), ("based", -0.04), ("on", -0.02), ("audit.", -0.02)
+        ]
+        poison.append(subtle_digit_stream)
+
+        # Case B: Multi-clause complex sentence with safe linguistic variance (-0.55 logprob drop on rare vocabulary)
+        # V1 Base might trip due to raw list variance, but V2-V5 dampens it with POS stopword weighting
+        complex_grounded_stream = [
+            ("Although", -0.04), ("customs", -0.05), ("clearance", -0.55), ("occasionally", -0.45),
+            ("introduces", -0.35), ("transient", -0.40), ("delays,", -0.05),
+            ("overall", -0.02), ("SLA", -0.03), ("compliance", -0.02), ("remains", -0.02), ("at", -0.01),
+            ("99.4%", -0.05)
+        ]
+        grounded.append(complex_grounded_stream)
+
+        # Case C: Contextual Parametric Drift (Plausible sounding text generated without Celonis RAG context)
+        # V1-V3 might treat it as normal generation, but V4-V5 PMI flags it immediately
+        parametric_drift_stream = [
+            ("Standard", -0.03), ("vendor", -0.02), ("onboarding", -0.04), ("procedures", -0.05),
+            ("are", -0.02), ("typically", -0.08), ("delegated", -0.12), ("to", -0.02),
+            ("regional", -0.15), ("affiliate", -0.65), ("representatives.", -0.70)
+        ]
+        poison.append(parametric_drift_stream)
+
         # Edge cases: Subtle numeric hallucination vs Grammatical stopword variation
         edge = [
             # Subtly ungrounded digit (moderate logprob drop: -1.25)
