@@ -7,3 +7,6 @@ __pycache__/
 
 # DPK runs in its own venv (see dpk_ingest.py) — never install it here.
 .venv-dpk/
+
+# Runtime compliance trail, appended per interception.
+data/audit_log.jsonl

@@ -25,13 +25,49 @@ An enterprise hallucination is usually a confident fabricated number, which is
 exactly the case Layer 1 alone misses. That is why both exist.
 """
 
+import hashlib
+import json
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import celonis_metrics as cm
 from entropy_engine import EntropyEngine
+
+AUDIT_LOG_PATH = Path(__file__).parent / "data" / "audit_log.jsonl"
+
+
+def log_compliance_breach(query: str, reason: str, score: float, value: Optional[float] = None) -> None:
+    """
+    Append-only record of every interception, for the compliance trail.
+
+    The query is SHA-256'd, not stored: an audit log that reproduces the
+    questions people asked is itself a disclosure risk, and the hash is enough to
+    prove the same prompt recurred.
+
+    JSONL rather than a JSON array, because the array form has to read the whole
+    file, append and rewrite it on every breach - which is O(n) per interception
+    and truncates the log if the process dies mid-write. One line, one append,
+    nothing to corrupt.
+    """
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+        "action": "INTERCEPTED_AND_HALTED",
+        "reason": reason,
+        "score": round(score, 4),
+        "ungrounded_value": value,
+    }
+    try:
+        AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(AUDIT_LOG_PATH, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError as err:
+        # An unwritable audit log must not take the demo down with it.
+        print(f"[Sentinel] audit log write failed: {err}")
 
 # A quantitative claim: a standalone number, optionally with $ , . and %.
 #
@@ -265,6 +301,7 @@ class SentinelStream:
         ungrounded_value, emitted, history, t0, overhead_s,
     ) -> AsyncIterator[InterceptionEvent]:
         """Emit the interception + autonomous recovery pair for a tripped breaker."""
+        log_compliance_breach(query, reason, uncertainty, ungrounded_value)
         yield InterceptionEvent(
             kind="intercept",
             text=tok,
