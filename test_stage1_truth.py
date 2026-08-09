@@ -320,3 +320,48 @@ class TestMetricNamedAfterTheFigure(unittest.TestCase):
         """
         partial = "The mean compliance cycle time is 10.4"
         self.assertFalse(self.s._scan_new_figures(partial, 0, complete_only=False)[0] is not None)
+
+
+class TestGenericAliasLosesToSpecific(unittest.TestCase):
+    """
+    "cycle time" names the DIMENSION. Every activity metric in the table is a
+    cycle time, so the generic phrase co-occurs with the specific one in almost
+    every real sentence, and neither length nor position separates them:
+
+        "'Supply Chain Bottleneck Flagged' is the biggest bottleneck with a
+         mean cycle time of 12.47"
+
+    "bottleneck" and "cycle time" are both ten characters and the generic sits
+    nearer the figure, so it won on both rules. 12.47 is that activity's correct
+    mean; it was halted against the overall 8.5, and the recovery then answered
+    with 12.47 - the system contradicting itself in front of the audience.
+    """
+
+    def setUp(self):
+        from sentinel_stream import SentinelStream
+        self.s = SentinelStream(runner=None, retriever=None)
+
+    def _caught(self, text):
+        return self.s._scan_new_figures(text, 0, complete_only=False)[0] is not None
+
+    def test_specific_metric_wins_over_the_dimension(self):
+        for text in (
+            "The activity 'Supply Chain Bottleneck Flagged' is the biggest bottleneck "
+            "with a mean cycle time of 12.47 days.",
+            "Across 122 high-value orders above $100,000, the mean cycle time is 9.11 days.",
+            "mean cycle time for Compliance Review is 10.43 days",
+            "Invoice Approved has a mean cycle time of 12.01 days.",
+        ):
+            self.assertFalse(self._caught(text), f"correct figure halted: {text}")
+
+    def test_generic_still_binds_when_it_is_the_only_metric_named(self):
+        """Dropping the generic tier entirely would reopen the 12.7 leak."""
+        self.assertTrue(self._caught("The mean cycle time is 12.7 days."))
+        self.assertFalse(self._caught("The mean cycle time is 8.5 days."))
+
+    def test_wrong_statistic_of_the_right_metric_is_still_caught(self):
+        """Specificity must not become a blanket pass for the bound metric."""
+        self.assertTrue(
+            self._caught("Invoice Approved has a mean cycle time of 23 days."),
+            "23 is that activity's MAX stated as its mean",
+        )

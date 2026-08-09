@@ -213,6 +213,12 @@ def metric_statistics(path: str = str(DATA_PATH)) -> Dict[str, Dict[str, frozens
     return out
 
 
+# Aliases that name the DIMENSION rather than a metric. They exist so that
+# "what is the mean cycle time?" binds to something at all, but every specific
+# metric in the table is also a cycle time, so they must lose to any specific
+# phrase in the same span. See bound_metric.
+_GENERIC_ALIASES = frozenset({"cycle time"})
+
 # Words that name WHICH statistic of a metric a sentence is claiming. Kept
 # deliberately narrow: a phrase only lands here when it is unambiguous, because
 # the cost of a wrong statistic binding is halting a correct answer, while the
@@ -286,7 +292,24 @@ def bound_metric(text: str, window: int = 200) -> Optional[str]:
     """
     recent = text[-window:].lower()
     hits = [(len(k), recent.rfind(k), k) for k in metric_aliases() if k in recent]
-    return max(hits)[2] if hits else None
+    if not hits:
+        return None
+    # A generic phrase only binds when nothing specific is named. "cycle time"
+    # is a DIMENSION, not a metric - every activity metric in the table is a
+    # cycle time - so it co-occurs with the specific phrase in almost every real
+    # sentence and neither length nor position separates them:
+    #
+    #   "'Supply Chain Bottleneck Flagged' is the biggest bottleneck with a mean
+    #    cycle time of 12.47"
+    #
+    # "bottleneck" and "cycle time" are both ten characters, and "cycle time"
+    # sits nearer the figure, so it won on both rules and 12.47 - that
+    # activity's correct mean - was checked against the overall 8.5 and halted.
+    # The recovery then answered with 12.47, so the system contradicted itself
+    # on screen. Tiering resolves it by specificity, which is what the sentence
+    # actually means.
+    specific = [h for h in hits if h[2] not in _GENERIC_ALIASES]
+    return max(specific or hits)[2]
 
 
 def is_grounded_number(
