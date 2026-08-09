@@ -35,7 +35,9 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import celonis_metrics as cm
+import gap_ledger
 import semantic_divergence as sd
+import semantic_entropy as se
 from entropy_engine import EntropyEngine
 
 AUDIT_LOG_PATH = Path(__file__).parent / "data" / "audit_log.jsonl"
@@ -193,12 +195,14 @@ class SentinelStream:
         self,
         runner,
         retriever=None,
-        tau: float = 0.85,
+        tau: float = 0.65,
         window_size: int = 5,
         check_numbers: bool = True,
         max_new_tokens: int = 160,
-        breach_run: int = 2,
+        breach_run: int = 3,
         grounded_prompt: bool = True,
+        semantic: Optional["se.SemanticEntropy"] = None,
+        tiering: bool = True,
     ):
         """
         :param breach_run: consecutive threshold breaches required to trip the
@@ -219,24 +223,28 @@ class SentinelStream:
             figure is a deterministic fact-check, not a noisy statistic, so one
             occurrence is conclusive.
 
-            Default of 2 comes from calibrate_tau.py, re-measured 2026-08-09
-            against the granite3.3:8b actually being served. The numbers this
-            docstring used to quote (answerable p90 0.387 / max 1.150) came from
-            the transformers granite-3.3-2b runner and were never re-taken after
-            the move to Ollama, because the script had a plain `for` over an
-            async generator and could not run.
+            Default of 3 comes from calibrate_sentinel.py over 101 labelled
+            queries (52 answerable / 49 unanswerable), which supersedes the
+            12-prompt sweep this docstring used to quote. With the position-aware
+            threshold on, at tau=0.65:
 
-            Live figures, 6 prompts per class: answerable median 0.054, p90
-            0.637, max 1.723; unanswerable median 0.042, p90 1.210, max 3.681.
-            The two class MEDIANS are indistinguishable - the separation lives
-            entirely in the tail, which is the honest reason a single breach is
-            not evidence and a run is required.
+                breach_run=2  ->  3/52 false positives, 0/49 misses
+                breach_run=3  ->  2/52 false positives, 0/49 misses   <- this one
 
-            No setting in the sweep separates the classes cleanly. Every setting
-            that detects 6/6 costs 2-4 false positives; the best zero-false-
-            positive setting is tau=0.85 run=2 at 3/6. A false positive halts a
-            correct answer in front of the judges, a miss is picked up by the
-            numeric layer, so the trade is taken toward silence.
+            A third required breach removes a false positive and costs no
+            detection, on a set where 12 prompts could not have told the
+            difference. The recommended setting is the middle of a five-wide
+            plateau (tau 0.55-0.75, all 2/52 and 0/49); the middle is taken
+            because the edges of a plateau are where the estimate is least
+            reliable.
+
+            READ THE MISS COLUMN CAREFULLY. 0/49 is not the entropy layer's
+            achievement: 48 of the 49 unanswerable queries are stopped by the
+            DETERMINISTIC numeric layer, and none of the 49 was refused outright.
+            The statistical layer is a supplement here, not the workhorse - which
+            is the same conclusion the two-layer design was built on, now measured
+            rather than argued. Both remaining false positives are also numeric,
+            so no value of tau or breach_run removes them.
         """
         self.runner = runner
         self.retriever = retriever
@@ -248,6 +256,13 @@ class SentinelStream:
         # False selects the naive-integration system prompt, so the baseline
         # panel can be audited with the same code path it is compared against.
         self.grounded_prompt = grounded_prompt
+        # The K-path layer. None disables it entirely and the stream behaves
+        # exactly as it did before - which is what keeps the offline demo alive
+        # when the draft model is not pulled, and what the A/B in the benchmark
+        # toggles.
+        self.semantic = semantic
+        # False collapses the three tiers back to the original binary halt.
+        self.tiering = tiering
 
     # ---------- retrieval ----------
 
@@ -549,8 +564,39 @@ class SentinelStream:
         self, span: str, scope: str = "all", metric: Optional[str] = None,
         statistic: Optional[str] = None, metrics: Optional[List[str]] = None,
         unit: Optional[str] = None, sentence_complete: bool = True,
+        claim: str = "",
     ) -> Optional[float]:
-        """First number in `span` that the event log cannot produce."""
+        """
+        First number in `span` that the event log cannot produce.
+
+        :param claim: the surrounding sentence, used ONLY for the live filtered
+            query below. Passing it is what turns a conditional claim from
+            unverifiable into checkable.
+        """
+        # REAL-TIME PROCESS QUERY. Everything below this block compares against
+        # sets precomputed over the whole log or per activity, which know nothing
+        # about a claim that names a FILTER:
+        #
+        #   "the average approval delay for cost center CC-9902 was 3 days"
+        #
+        # checked against the whole log, 3 is some event's cycle_time_days, so it
+        # passes. Running the aggregation the claim actually describes is the only
+        # honest check, and the decisive case is the empty one: a filter matching
+        # NO events means the log holds no data for that entity, so every figure
+        # about it is fabricated whatever its value. That is a false negative the
+        # precomputed sets cannot close, because they have no way to represent
+        # "this entity does not exist".
+        #
+        # Deliberately one-directional. An empty match REJECTS; a non-empty match
+        # only ADDS its filtered values to the admissible set, never narrows it.
+        # Narrowing would let a mis-parsed filter halt a true sentence, and the
+        # filter parser is a regex over free text - the least trustworthy input
+        # in this file. Adding candidates cannot manufacture a false positive.
+        live = cm.live_process_query(claim) if claim else None
+        if live is not None and live["matched_events"] == 0:
+            vals = self._numbers_in(span)
+            if vals:
+                return vals[0]
         # A percentage that names no metric we know cannot be grounded at all.
         # The event log has no percentage field, so every legitimate percentage
         # is derived from a nameable metric (the bottleneck rate). Without this,
@@ -599,7 +645,37 @@ class SentinelStream:
         # correct. Accept the figure if ANY metric it names admits it; a figure
         # that fits none still fails, so no detection is lost. See
         # cm.bound_metrics for why neither longest-wins nor nearest-wins works.
+        # Values the FILTERED aggregation actually produced, admitted alongside
+        # the precomputed sets. This is the loosening half of the live query: a
+        # true conditional claim ("Compliance Review in Finance averages 11.2
+        # days") states a number no whole-log set contains, and without this it
+        # would be rejected for being specific.
+        #
+        # Only the values matching the claim's OWN unit and statistic. Admitting
+        # the whole filtered blob is the same mistake is_grounded_number spends
+        # its statistic and unit parameters avoiding, and it cost five
+        # regressions when this first landed: "3 events are recorded for the
+        # Invoice Approved activity" was admitted because that activity's
+        # min_cycle_days is 3 - a DURATION validating a COUNT, where the real
+        # count is 150. With neither unit nor statistic bound nothing is
+        # admitted, so an unlabelled figure falls through to exactly the
+        # behaviour that shipped.
+        live_vals: List[float] = []
+        if live:
+            v = live["values"]
+            if unit == "count":
+                # Both populations, because "events" and "orders" both read as
+                # counts here and the log distinguishes them - see the same
+                # warning in cm.live_process_query.
+                live_vals = [v["count"], v["cases"]]
+            elif unit == "money":
+                live_vals = [v["mean_amount_usd"], v["total_amount_usd"]]
+            elif statistic in ("mean", "max", "min"):
+                live_vals = [v.get(f"{statistic}_cycle_days")]
+            live_vals = [x for x in live_vals if isinstance(x, (int, float))]
         for val in self._numbers_in(span):
+            if any(abs(v - val) <= max(abs(v), abs(val), 1e-9) * 0.02 for v in live_vals):
+                continue
             if not any(
                 cm.is_grounded_number(val, scope=scope, metric=m, statistic=statistic,
                                       unit=unit)
@@ -651,6 +727,9 @@ class SentinelStream:
                 # complete_only IS the mid-decode pass, so a rule that concludes
                 # from an absent metric must wait for the end-of-stream rescan.
                 sentence_complete=not complete_only,
+                # The metric span doubles as the filter span: both answer "what
+                # is this figure ABOUT", and it is already computed.
+                claim=mspan,
             )
             if val is not None:
                 return val, scanned_to
@@ -694,7 +773,8 @@ class SentinelStream:
             statistic = self._bound_statistic(text, m.start(), m.end(), unit, mspan)
             scope = self._claim_scope(prefix, figure=figure)
             contradicted = self._ungrounded_number(
-                figure, scope=scope, metrics=metrics, statistic=statistic, unit=unit
+                figure, scope=scope, metrics=metrics, statistic=statistic, unit=unit,
+                claim=mspan,
             ) is not None
             if contradicted:
                 state = "contradicted"
@@ -740,6 +820,7 @@ class SentinelStream:
     async def _trip(
         self, query, rag, reason, tok, step, uncertainty, variance, shannon,
         ungrounded_value, emitted, history, t0, overhead_s, decision=None,
+        semantic=None,
     ) -> AsyncIterator[InterceptionEvent]:
         """
         Emit the interception + autonomous recovery pair for a tripped breaker.
@@ -757,7 +838,15 @@ class SentinelStream:
             between numbers. This carries the decision point instead.
         """
         dstep, div = decision if decision else (None, None)
+        # history excludes the halting token - it is appended only after the trip
+        # check - and that token is usually the unit noun that completed the claim
+        # ("9.11" + " days"). Reading history alone judged a sentence the detector
+        # had not judged, and came back with no contradiction at all.
+        refutation = self._refutation("".join(history) + tok)
         log_compliance_breach(query, reason, uncertainty, ungrounded_value)
+        # The audit log proves a PROMPT recurred; the ledger proves the same GAP
+        # did, across differently-worded prompts, and ranks it for curation.
+        gap = gap_ledger.record(reason, refutation, query, ungrounded_value)
         yield InterceptionEvent(
             kind="intercept",
             text=tok,
@@ -799,12 +888,28 @@ class SentinelStream:
                 # only say "not in log", which is the wrong reason whenever the
                 # figure is real but belongs to another metric - the commonest
                 # case this layer catches. See _refutation.
-                # history excludes the halting token - it is appended only after
-                # the trip check - and that token is usually the unit noun that
-                # completed the claim ("9.11" + " days"). Reading history alone
-                # judged a sentence the detector had not judged, and came back
-                # with no contradiction at all.
-                "refutation": self._refutation("".join(history) + tok),
+                "refutation": refutation,
+                # "this gap has now been hit N times, and is #R on the curation
+                # queue" - a single interception looks like an incident, the
+                # count is what makes it a backlog item worth a data fix.
+                "gap_hit_count": gap["hit_count"],
+                "gap_rank": gap["rank"],
+                # The K-path evidence, when a checkpoint had run before the trip.
+                # This is the one number on the payload that comes from sampling
+                # the model rather than from reading one distribution, so it is
+                # the only place the pitch's "it tells a different story each
+                # run" claim can actually be checked - the paths are carried so a
+                # judge can read them.
+                "kpath": {
+                    "k": semantic.k,
+                    "semantic_entropy": semantic.entropy,
+                    "normalised": semantic.normalised,
+                    "clusters": len(semantic.clusters),
+                    "figures": semantic.figures,
+                    "figure_share": semantic.figure_share,
+                    "paths": semantic.paths,
+                    "explained": semantic.explain(),
+                } if semantic is not None else None,
                 "tokens_before_halt": emitted,
                 "token_budget": self.max_new_tokens,
                 "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
@@ -886,6 +991,20 @@ class SentinelStream:
                 "all_figures_grounded": verified,
                 "figure_audit": audit,
                 "fell_back_to_lookup": not regenerated_ok,
+                # What the protected path ACTUALLY cost, end to end: the tokens
+                # decoded before the halt plus the tokens the repair decoded, and
+                # the wall clock from the first token of the original generation
+                # to the final answer being ready.
+                #
+                # The panel used to report tokens_before_halt and elapsed-to-halt,
+                # which describe the abandoned generation rather than the answer
+                # the user receives, and alongside them a "decode prevented"
+                # figure that was budget minus halt index - unused allowance, not
+                # work avoided. It counted the recovery as free. Interception
+                # spends MORE than letting the fabrication finish; the claim
+                # worth making is that it spends it on a correct answer.
+                "total_tokens": emitted + len(recovered),
+                "total_elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
             },
         )
 
@@ -907,6 +1026,20 @@ class SentinelStream:
         consecutive = 0         # length of the current run of threshold breaches
         decision = None         # (step, divergence) where a figure was most at stake
         decision_mass = 0.0     # numeric mass at that step; see the update below
+        # 0, NOT a large number. Seeding this high let the very first token
+        # checkpoint, and a checkpoint at token 0 has no prefix to continue - so
+        # the draft model answers the question from scratch instead of finishing
+        # granite's sentence, and its figures have nothing to do with the value
+        # granite is about to state. Measured: "What is the mean compliance cycle
+        # time?" checkpointed at token 0, came back with figures [0.4, 2.0],
+        # ruled them divergent and BLOCKED an answer whose next tokens were the
+        # correct 10.4. The whole method rests on continuing a sentence in
+        # flight; starting at 0 means the first checkpoint cannot fire until
+        # min_gap tokens exist to continue.
+        since_ckpt = 0          # tokens since the last K-path checkpoint
+        semantic_result = None  # most recent K-path measurement, if any
+        checkpoints = 0
+        hedged = None           # (tier, why) if the stream was allowed through hedged
 
         async for step in self.runner.stream(prompt, max_new_tokens=self.max_new_tokens):
             tok = step.text
@@ -953,26 +1086,97 @@ class SentinelStream:
 
             overhead_s += time.perf_counter() - c0
 
+            # ADAPTIVE CHECKPOINT. The K-path measurement costs K draft
+            # generations - hundreds of milliseconds - so it cannot run per
+            # token, and running it only at the end would make it post-hoc, which
+            # is the thing this project exists to replace. It is gated on the two
+            # signals that are already free: granite's own distribution putting
+            # mass on digits (fires BEFORE the figure lands, the earliest warning
+            # available anywhere in the system) and the token just emitted being
+            # high-stakes. See semantic_entropy.should_checkpoint.
+            since_ckpt += 1
+            if self.semantic is not None:
+                why_ckpt = se.should_checkpoint(
+                    divergence, since_ckpt, engine.get_token_type_weight(tok)
+                )
+                if why_ckpt:
+                    since_ckpt = 0
+                    checkpoints += 1
+                    # NOT counted in overhead_s: that number is the always-on
+                    # per-token cost, and folding a 400 ms checkpoint into it
+                    # would report the cheap layers as expensive. The checkpoint
+                    # is reported on its own terms below.
+                    measured = await self.semantic.measure(prompt, text)
+                    if measured is not None:
+                        semantic_result = measured
+                        yield InterceptionEvent(
+                            kind="checkpoint",
+                            text="",
+                            payload={
+                                "reason": why_ckpt,
+                                "token_index": step.index,
+                                "k": measured.k,
+                                "semantic_entropy": measured.entropy,
+                                "normalised": measured.normalised,
+                                "clusters": len(measured.clusters),
+                                "figures": measured.figures,
+                                "cached": measured.cached,
+                                "elapsed_ms": measured.elapsed_ms,
+                                "explained": measured.explain(),
+                                "paths": measured.paths,
+                            },
+                        )
+
             # Entropy: noisy per-token signal, so require a sustained run.
             # Numbers: deterministic check, so one is enough.
             consecutive = consecutive + 1 if is_hallucinating else 0
             trip_reason = None
+            tier, tier_why = "pass", ""
             if ungrounded_value is not None:
+                # The deterministic layer is NOT tiered. A figure the event log
+                # cannot produce is a fact-check, not a confidence estimate;
+                # hedging it would mean printing a known-false number with a
+                # caveat attached, which is worse than either blocking or staying
+                # silent. Tiering applies to the statistical layers, where the
+                # evidence really is a matter of degree.
                 trip_reason = "ungrounded_number"
-            elif consecutive >= self.breach_run and not self._mid_figure(text):
+            elif not self._mid_figure(text):
                 # A figure is being emitted right now, so the deterministic check
                 # is about to have an opinion on it. Digits are individually
                 # high-entropy, so letting the statistical layer fire first halts
                 # on "1" of "12.5" and reports semantic_entropy with no value,
                 # when one more token yields the far stronger "12.5 is not a
                 # compliance cycle time". Defer to the layer that can name it.
-                trip_reason = "semantic_entropy"
+                #
+                # CONFIDENCE-AWARE TIERING. The run of breaches is still what
+                # makes the scalar layer usable, but the response to it is no
+                # longer binary: fallback_tier reads how far over tau the score
+                # sits, and lets the K-path evidence escalate a hedge to a block.
+                if self.tiering:
+                    tier, tier_why = se.fallback_tier(uncertainty, self.tau, semantic_result)
+                    if tier == "block" and (consecutive >= self.breach_run
+                                            or semantic_result is not None):
+                        trip_reason = "semantic_entropy"
+                    elif tier == "hedge" and consecutive >= self.breach_run and not hedged:
+                        # Delivered, not withheld. A hedge on a true statement
+                        # costs a caveat; a block on a true statement costs the
+                        # user's belief that the system works, and that is the
+                        # error that ends an enterprise deployment.
+                        hedged = (tier, tier_why)
+                        yield InterceptionEvent(
+                            kind="hedge",
+                            text="",
+                            payload={"reason": tier_why, "token_index": step.index,
+                                     "uncertainty": round(uncertainty, 4), "tau": self.tau},
+                        )
+                elif consecutive >= self.breach_run:
+                    trip_reason = "semantic_entropy"
 
             if trip_reason:
                 async for ev in self._trip(
                     query, rag, trip_reason, tok, step, uncertainty, variance,
                     shannon, ungrounded_value, emitted, history, t0, overhead_s,
-                    decision,
+                    decision, semantic_result,
                 ):
                     yield ev
                 # The circuit breaker actually breaks: decoding stops here.
@@ -1020,7 +1224,7 @@ class SentinelStream:
                 async for ev in self._trip(
                     query, rag, "ungrounded_number", str(trailing), None, 0.0,
                     last.get("current_variance", 0.0), 0.0, trailing,
-                    emitted, history, t0, overhead_s, decision,
+                    emitted, history, t0, overhead_s, decision, semantic_result,
                 ):
                     yield ev
                 return
@@ -1044,6 +1248,19 @@ class SentinelStream:
                 "entropy_overhead_ms": round(overhead_s * 1000, 3),
                 "overhead_pct": round(overhead_s * 1000 / total_ms * 100, 4) if total_ms else 0.0,
                 "retrieval_reason": rag.get("reason"),
+                # What the adaptive gate actually did on this response. The rate
+                # is the number that decides whether the K-path layer is
+                # affordable, so it is reported per run rather than only in the
+                # benchmark - a demo prompt that checkpoints on every token would
+                # otherwise look identical to one that never did.
+                "checkpoints": checkpoints,
+                "checkpoint_rate": round(checkpoints / emitted, 4) if emitted else 0.0,
+                # A hedged answer was DELIVERED, with the caveat attached. The
+                # terminal renders this differently from both a clean pass and a
+                # halt, because it is a third outcome and collapsing it into
+                # either one misrepresents what the system decided.
+                "tier": "hedge" if hedged else "pass",
+                "hedge_reason": hedged[1] if hedged else None,
             },
         )
 
@@ -1093,6 +1310,34 @@ def demo() -> None:
     # contradicts it - but the sentence calls it an order count and names no
     # metric, so it must not come back as verified. This is the exact overclaim
     # that let a false figure be reported as grounded.
+    #
+    # KNOWN FAILURE, and deliberately left failing rather than relaxed.
+    #
+    # It reproduces on the commit before any of the semantic-binding, hybrid
+    # retrieval or K-path work - checked by running this exact call against
+    # `git archive HEAD` - so it is not a regression from that work. Two rules
+    # that were each added for good reasons now contradict each other:
+    #
+    #   * cm.metric_statistics aliases "$100,000" to the high-value metric, whose
+    #     count is 122 orders. Its comment argues the figure_unit rule makes that
+    #     binding safe, which would make 393 CONTRADICTED here.
+    #   * cm._log_wide admits high_value_events (393) for ANY count claim, which
+    #     makes it VERIFIED instead.
+    #
+    # The assertion above wants a third answer - unverifiable - from before the
+    # alias existed. All three readings are defensible and the log genuinely
+    # holds both populations; what it cannot do is tell "orders" from "events",
+    # because cm.figure_unit collapses both to unit="count".
+    #
+    # The real fix is to split that unit so a claim counted in ORDERS is checked
+    # against case counts and one counted in EVENTS against event counts. That
+    # touches _UNIT_WORDS, _STATISTIC_UNIT and every metric's statistic table -
+    # the most load-bearing code in the repo, with 90 tests on it - so it is
+    # named here rather than done under deadline. Suppressing the assert instead
+    # would hide a live false negative: "There were 393 orders" is false, and
+    # today the system reports it as verified.
+    #
+    # ponytail: known false negative, orders-vs-events unit split is the fix.
     loose = s.audit_figures("There were 393 orders above $100,000.")
     assert loose["verified"] == 0 and loose["contradicted"] == 0, loose
     assert loose["unverifiable"] == 2, loose

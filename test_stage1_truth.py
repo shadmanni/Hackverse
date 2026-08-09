@@ -81,7 +81,13 @@ class TestRetrieverScoring(unittest.TestCase):
         cls.r = SentinelRAGRetriever()
 
     def test_fused_scores_are_bounded_probabilities(self):
-        for q in ["invoice approval cycle time", "banana helicopter zebra", "CASE-10231 amount"]:
+        # "recipe for lasagna 47 please" is here because BM25 matches the bare
+        # "47" and hands back a chunk whose cosine to that sentence is NEGATIVE.
+        # The sparse arm can surface any term-sharing document, not just the
+        # top cosines the dense arm returned, so the 0..1 floor stopped being
+        # free the moment retrieval went hybrid. Measured -0.0129 before the clamp.
+        for q in ["invoice approval cycle time", "banana helicopter zebra",
+                  "CASE-10231 amount", "recipe for lasagna 47 please"]:
             for h in self.r.retrieve(q, top_k=3):
                 self.assertGreaterEqual(h["similarity_score"], 0.0, f"{q}: score below 0")
                 self.assertLessEqual(h["similarity_score"], 1.0, f"{q}: score above 1")

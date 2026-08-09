@@ -117,7 +117,12 @@ class Phase4DemoRunner:
                 grounded_verified += 1
 
             chunks = retrieval_res.get("chunks", [])
-            top_score = chunks[0]["similarity_score"] if chunks else 0.0
+            # The max, not chunks[0]: chunks are ordered by CrossEncoder logit,
+            # so the first one is not the highest-scoring one. Reading it as the
+            # top score printed a number up to 0.057 below the score
+            # retrieval_support actually thresholded on - a demo report whose
+            # verdict column and score column disagreed.
+            top_score = retrieval_res.get("top_score", 0.0)
             top_chunk_text = chunks[0]["text"] if chunks else "N/A"
 
             status_symbol = "[VERIFIED]" if is_verified else "[FALSE POSITIVE INTERCEPTION]"

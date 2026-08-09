@@ -249,12 +249,39 @@ class TestAggregateClaimScoping(unittest.IsolatedAsyncioTestCase):
                          f"real aggregate rejected: {[e.payload for e in evs if e.kind=='intercept']}")
 
     async def test_raw_event_value_still_passes_in_a_per_case_claim(self):
-        """15 days IS a real cycle time for some individual case."""
-        script = [("Case", .99), (" CASE", .98), ("-", .98), ("10231", .97),
+        """
+        15 days IS a real cycle time for CASE-10010 - it is that case's max.
+
+        The case id used to be CASE-10231, which does NOT appear in
+        mock_celonis_data_large.json at all (it belongs to the unused 9-event
+        mock_celonis_data.json). That made this test assert that a claim about a
+        NON-EXISTENT case must stream clean, which is the opposite of what the
+        system should do - it only passed because nothing could check it. The
+        live filtered query can, so the fixture now names a case the log holds
+        and the test measures what it was written to measure: a raw per-event
+        value in a per-case claim must not be judged against the aggregates.
+        """
+        script = [("Case", .99), (" CASE", .98), ("-", .98), ("10010", .97),
                   (" took", .98), (" 15", .97), (" days", .98), (".", .99)]
         evs = await run(script)
         self.assertEqual(evs[-1].kind, "done",
                          "a valid per-case figure was rejected as if it were an aggregate")
+
+    async def test_figure_about_a_case_absent_from_the_log_is_caught(self):
+        """
+        The other half, and a detection the precomputed sets cannot make.
+
+        CASE-10231 is not in the event log. 15 is a real cycle time SOMEWHERE in
+        the log, so every set-membership check admits it and the claim streams
+        clean - a fabricated case reference carrying a plausible figure, which is
+        exactly the enterprise failure this project exists to stop. Only running
+        the filter can see that the case has no events at all.
+        """
+        script = [("Case", .99), (" CASE", .98), ("-", .98), ("10231", .97),
+                  (" took", .98), (" 15", .97), (" days", .98), (".", .99)]
+        evs = await run(script)
+        icept = [e for e in evs if e.kind == "intercept"]
+        self.assertTrue(icept, "a figure attributed to a non-existent case was not caught")
 
 
 class TestTelemetryIsMeasured(unittest.IsolatedAsyncioTestCase):

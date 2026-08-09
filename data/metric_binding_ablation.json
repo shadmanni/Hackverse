@@ -1,0 +1,116 @@
+{
+  "model": "all-MiniLM-L6-v2",
+  "chosen_threshold": 0.45,
+  "span_form": "paraphrase + figure tail, digits stripped - what bound_metrics actually receives",
+  "figure_tails": [
+    " is 19 days",
+    " was 3 days on average",
+    " totalled 41 events",
+    " averaged 12.5 days",
+    " came to 460",
+    " reached 150",
+    " stood at 10.4 days",
+    " hit 25.33 percent"
+  ],
+  "sweep": [
+    {
+      "threshold": 0.3,
+      "correct_binding_rate": 0.625,
+      "false_binding_rate": 0.208,
+      "correct": 90,
+      "positives": 144,
+      "false": 50,
+      "negatives": 240
+    },
+    {
+      "threshold": 0.35,
+      "correct_binding_rate": 0.507,
+      "false_binding_rate": 0.075,
+      "correct": 73,
+      "positives": 144,
+      "false": 18,
+      "negatives": 240
+    },
+    {
+      "threshold": 0.4,
+      "correct_binding_rate": 0.389,
+      "false_binding_rate": 0.037,
+      "correct": 56,
+      "positives": 144,
+      "false": 9,
+      "negatives": 240
+    },
+    {
+      "threshold": 0.45,
+      "correct_binding_rate": 0.222,
+      "false_binding_rate": 0.004,
+      "correct": 32,
+      "positives": 144,
+      "false": 1,
+      "negatives": 240
+    },
+    {
+      "threshold": 0.5,
+      "correct_binding_rate": 0.083,
+      "false_binding_rate": 0.0,
+      "correct": 12,
+      "positives": 144,
+      "false": 0,
+      "negatives": 240
+    },
+    {
+      "threshold": 0.55,
+      "correct_binding_rate": 0.042,
+      "false_binding_rate": 0.0,
+      "correct": 6,
+      "positives": 144,
+      "false": 0,
+      "negatives": 240
+    },
+    {
+      "threshold": 0.6,
+      "correct_binding_rate": 0.0,
+      "false_binding_rate": 0.0,
+      "correct": 0,
+      "positives": 144,
+      "false": 0,
+      "negatives": 240
+    },
+    {
+      "threshold": 0.65,
+      "correct_binding_rate": 0.0,
+      "false_binding_rate": 0.0,
+      "correct": 0,
+      "positives": 144,
+      "false": 0,
+      "negatives": 240
+    },
+    {
+      "threshold": 0.7,
+      "correct_binding_rate": 0.0,
+      "false_binding_rate": 0.0,
+      "correct": 0,
+      "positives": 144,
+      "false": 0,
+      "negatives": 240
+    },
+    {
+      "threshold": 0.75,
+      "correct_binding_rate": 0.0,
+      "false_binding_rate": 0.0,
+      "correct": 0,
+      "positives": 144,
+      "false": 0,
+      "negatives": 240
+    },
+    {
+      "threshold": 0.8,
+      "correct_binding_rate": 0.0,
+      "false_binding_rate": 0.0,
+      "correct": 0,
+      "positives": 144,
+      "false": 0,
+      "negatives": 240
+    }
+  ]
+}

@@ -10,3 +10,8 @@ __pycache__/
 
 # Runtime compliance trail, appended per interception.
 data/audit_log.jsonl
+
+# Same, aggregated: the gap queue is accumulated at runtime, so a committed copy
+# would ship one machine's hit counts as if they were the product's.
+data/knowledge_gaps.json
+data/knowledge_gaps.json.tmp

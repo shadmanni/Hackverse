@@ -1,6 +1,6 @@
 {
   "measures": "whether retrieval similarity can decide answerability, before any token is generated",
-  "vector_store": "in_memory_fallback",
+  "vector_store": "milvus_lite",
   "does_not_measure": [
     "semantic entropy interception",
     "numeric grounding",

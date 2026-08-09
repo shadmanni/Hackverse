@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 
 import celonis_metrics as cm
+import gap_ledger
 import semantic_divergence as sd
 from entropy_engine import EntropyEngine
 from sentinel_stream import SentinelStream
@@ -39,18 +40,30 @@ load_dotenv()
 # execute, and the previous tau was inherited from the transformers/granite-2b
 # runner it was measured on).
 #
-# Measured on the live model, 6 answerable vs 6 unanswerable prompts:
-#   tau=0.65 run=2 -> 1 false positive, 4/6 detected   <- the previous setting
-#   tau=0.85 run=2 -> 0 false positives, 3/6 detected  <- this one
-# A false positive halts a correct answer on stage; a miss is picked up by the
-# numeric-grounding layer, which is deterministic and independent of tau. That
-# asymmetry is why the safer threshold wins. Six prompts per class is a small
-# sample - report these as counts, never as a percentage.
-TAU = float(os.getenv("SENTINEL_TAU", "0.85"))
+# Measured on the live model, 6 answerable vs 6 unanswerable prompts
+# (data/tau_calibration.json holds the full sweep):
+#   tau=0.65 run=2 -> 1 false positive, 4/6 detected   <- this one
+#   tau=0.85 run=2 -> 0 false positives, 3/6 detected
+# 0.65 buys one more detection for one more false positive. It is the setting
+# every other component in the repo already used - entropy_engine, the tests,
+# phase4_demo_run_of_show and benchmark_entropy_tradeoffs all default to 0.65,
+# and only main.py and SentinelStream were moved to 0.85, so the suite and the
+# reports were exercising a threshold the server did not serve. One value now.
+#
+# The cost is bounded by design: a false positive is not a wrong answer, it is
+# an early halt that the recovery pass then answers correctly from the log. Six
+# prompts per class is a small sample - report these as counts, never as a
+# percentage.
+TAU = float(os.getenv("SENTINEL_TAU", "0.65"))
 WINDOW = int(os.getenv("SENTINEL_WINDOW", "5"))
 MAX_NEW_TOKENS = int(os.getenv("SENTINEL_MAX_TOKENS", "120"))
+# K-path semantic entropy. On by default; SENTINEL_KPATH=0 falls back to the
+# two layers that need no second model, which is the configuration to use if the
+# draft model is not pulled on the demo machine.
+KPATH = os.getenv("SENTINEL_KPATH", "1") != "0"
 
-_state: Dict[str, Any] = {"runner": None, "retriever": None, "load_ms": None}
+_state: Dict[str, Any] = {"runner": None, "retriever": None, "load_ms": None,
+                          "semantic": None}
 
 
 def _load_models() -> None:
@@ -77,6 +90,39 @@ def _load_models() -> None:
         _state["retriever"] = SentinelRAGRetriever()
     except Exception as err:
         print(f"[Sentinel] Retriever unavailable: {err}")
+
+    # Semantic metric binding builds its own MiniLM the first time a figure's
+    # span misses the substring alias table - which happens mid-decode, on the
+    # request path this function exists to keep clear. Measured without this: a
+    # 12.4 s stall between two tokens of the first answer.
+    #
+    # It has to ENCODE, not just build the index. Constructing the index and
+    # embedding the alias table costs 13.3 s, and the first single-span encode
+    # after it still costs another 6.2 s of torch warm-up; only the second is
+    # fast (24 ms). Warming with _alias_index() alone left a 6.7 s mid-stream
+    # stall - measured, after the first attempt at this fix.
+    try:
+        cm._semantic_metrics("warm the encoder with one span")
+    except Exception as err:
+        print(f"[Sentinel] semantic metric binding warm-up failed: {err}")
+
+    # The K-path layer. Constructed once and SHARED across requests, so its
+    # cluster cache survives between queries - a poison prompt asked twice in a
+    # demo pays for K draft generations once. Sharing it is safe because measure()
+    # opens its own client per call and keeps no per-request state.
+    if KPATH:
+        try:
+            import semantic_entropy
+            sem = semantic_entropy.SemanticEntropy()
+            # Same reasoning as the granite warm-up below: the draft model is a
+            # separate llama-server process that is not resident until something
+            # asks it to generate, and the first thing to ask would otherwise be
+            # a checkpoint mid-answer. Also warms the clustering encoder.
+            sem._embed(["warm"])
+            asyncio.run(sem.measure([{"role": "user", "content": "ok"}], ""))
+            _state["semantic"] = sem
+        except Exception as err:
+            print(f"[Sentinel] K-path semantic entropy unavailable: {err}")
 
     # Force the weights into VRAM before the first query rather than during it.
     # Constructing OllamaRunner only checks /api/tags, which does not load
@@ -158,6 +204,16 @@ async def health_check():
         "pii_engine": provenance.get("pii_engine", "unknown-not-ingested"),
         "vector_store": "milvus-lite" if getattr(
             _state["retriever"], "has_milvus", False) else "in-memory-fallback",
+        # What retrieval ACTUALLY ran, read off the retriever rather than
+        # asserted here - the sparse arm is inline and could silently fail to
+        # build, and a trust panel that names a component it cannot confirm is
+        # the one claim a hallucination firewall may not make.
+        "retrieval_mode": getattr(_state["retriever"], "retrieval_mode", "unavailable"),
+        # The K-path layer is optional by design (it needs a second model
+        # pulled), so /health has to distinguish "off" from "on", or a demo
+        # running two layers looks identical to one running three.
+        "kpath_semantic_entropy": _state["semantic"] is not None,
+        "kpath_draft_model": getattr(_state["semantic"], "draft_model", None),
         "warmup_ms": _state["load_ms"],
         "circuit_breaker_tau": TAU,
         "event_log_cases": prof["total_cases"],
@@ -188,6 +244,21 @@ async def list_graphs():
             "activities": {k: v["event_count"] for k, v in prof["by_activity"].items()},
         }
     }
+
+
+@app.get("/gaps")
+async def get_gaps(limit: int = Query(20, ge=1)):
+    """
+    The firewall's own failures as a prioritised curation queue.
+
+    data/audit_log.jsonl says a prompt was intercepted; this says the same
+    knowledge gap has been hit N times under N different wordings, which is the
+    number that decides where curation effort goes.
+
+    ge=1 because ranked() slices: limit=-1 is a valid int that silently returns
+    every gap BUT the last one, i.e. wrong data with a 200 rather than a 422.
+    """
+    return JSONResponse({"gaps": gap_ledger.ranked(limit)})
 
 
 @app.get("/metrics")
@@ -243,6 +314,7 @@ async def stream_tokens(query: str = Query(None), mode: str = Query("ab")):
             window_size=WINDOW,
             max_new_tokens=MAX_NEW_TOKENS,
             grounded_prompt=grounded,
+            semantic=_state["semantic"],
         )
         try:
             async for ev in stream.run(q):

@@ -12,11 +12,18 @@
 The roadmap in section 5 is the original plan. Where it disagrees with this
 section, this section wins.
 
-* **Generation:** `ibm-granite/granite-3.3-2b-instruct` running **locally via
-  transformers on Apple MPS** (`granite_runner.py`). Not the watsonx API, not
-  Granite-13b. Chosen so the demo has no network dependency on stage. Real
-  per-token log-probabilities and top-5 distributions come out of the decode
-  loop — the entropy engine is fed measured values, not constants.
+* **Generation:** `granite3.3:8b` served by **Ollama** (`ollama_runner.py`), GGUF
+  through llama.cpp's Metal backend. Not the watsonx API, not Granite-13b, and no
+  longer the transformers/MPS `granite_runner.py` — that held granite-3.3-2b in
+  bf16 at 4.7 GB and decoded at 260-480 ms/token; the quantized 8B fits in about
+  the same memory with ~4x the parameters. Chosen so the demo has no network
+  dependency on stage. Real per-token log-probabilities and top-5 distributions
+  come out of the decode loop (`/api/chat` with `logprobs=true, top_logprobs=5`)
+  — the entropy engine is fed measured values, not constants.
+* **Draft model:** `qwen2.5:0.5b`, a SEPARATE Ollama model used only for K-path
+  speculation (`semantic_entropy.py`). Separate because Ollama runs one slot per
+  model (`-np 1`), so drafting on granite would stall the stream the user is
+  watching. Optional: `SENTINEL_KPATH=0` runs the system without it.
 * **Frontend:** Next.js "Security Terminal" (`frontend/`). **Streamlit is gone**
   — `streamlit_app.py` was deleted; two processes cannot hold the Milvus Lite
   lock at once.
@@ -29,18 +36,62 @@ section, this section wins.
   `dpk_ingest.py` stages it as an offline step in a separate venv, because DPK
   downgrades transformers to 4.57.6 and would break the model. Do not claim DPK
   is in the pipeline until that script has actually been run.
-* **Detection is two layers**, not one: semantic entropy over real logprobs
-  (requires a run of consecutive breaches, since a single flat token is usually
-  just sentence-opening or hedging), plus a deterministic numeric-grounding
-  check that refutes any figure the event log cannot produce.
+* **Detection is three layers**, ordered cheapest-first so the expensive one is
+  gated by the free ones:
+  1. **Per-token, free.** Weighted uncertainty over real logprobs
+     (`entropy_engine.py`) with a POSITION-AWARE tau — tolerance is raised at
+     sentence openings and after connectives, where a flat distribution means
+     nothing, and never raised for a figure. Plus `semantic_divergence.py`,
+     which clusters the decoder's own top-k by numeric value. Both read a
+     distribution that already exists, so they cost no extra forward pass.
+  2. **Per-figure, deterministic.** The numeric-grounding check that refutes any
+     figure the event log cannot produce (`sentinel_stream.py` +
+     `celonis_metrics.py`), now including `live_process_query` — a filtered
+     aggregation run at check time, so a claim about a cost centre or case the
+     log does not contain is refuted whatever its value.
+  3. **Per-checkpoint, expensive.** True semantic entropy
+     (`semantic_entropy.py`): K=5 speculative continuations from the draft model,
+     clustered by meaning, entropy over the clusters — the method in
+     doi:10.1038/s41586-024-07421-0, applied mid-stream. Costs ~K draft
+     generations, so it runs ONLY at adaptive checkpoints (see
+     `should_checkpoint`), not per token.
+* **The response is tiered, not binary** (`fallback_tier`): pass / hedge / block.
+  A score just over tau delivers the answer with a caveat; far over tau, or
+  K-path samples disagreeing on a figure, halts and runs the repair. The
+  deterministic layer is deliberately NOT tiered — a figure the log cannot
+  produce is a fact-check, not a confidence estimate.
+* **Interceptions accumulate into a ranked queue** (`gap_ledger.py`, `GET /gaps`):
+  the same knowledge gap hit under different wordings is counted once and ranked
+  by frequency, so the firewall's failures say where to spend curation effort.
+* **Retrieval is hybrid** (`phase3_rag_retriever.py`): BM25 (inline, no new
+  dependency) fused with dense Milvus search by Reciprocal Rank Fusion, then
+  CrossEncoder reranking. The sparse arm exists for exact identifiers —
+  `CASE-10101` went 0/3 to 3/3 relevant chunks.
+* **Calibration is measured, not asserted:** `calibration_set.py` generates 101
+  labelled queries FROM the event log (52 answerable / 49 unanswerable), and
+  `calibrate_sentinel.py` sweeps tau, breach_run, the clustering threshold and
+  the latency budget against them, reporting false positives and false negatives
+  separately. `data/calibration_report.json` is the artefact.
 * **Ground truth:** every aggregate the system may state comes from
   `celonis_metrics.py`. The declared mean compliance cycle time is **10.4 days**.
   Any hardcoded "4.2 business days" / "99.4% SLA" is a fabrication — the event
   log does not contain those figures.
 
-**Operational rules:** stop the backend before running `pytest` (two Granite
-instances on one MPS device segfault). Backend warm-up is ~35s at startup, paid
-once, not per query.
+**Operational rules:** stop the backend before running `pytest`,
+`calibrate_sentinel.py` or anything that opens Milvus Lite. Ollama serves one
+slot per model, and Milvus Lite is single-process, so a live backend and a
+benchmark take turns — every latency number measured against a running backend
+is wrong. Backend warm-up is ~35s at startup, paid once, not per query; it now
+also warms the metric-binding encoder and the draft model, because both
+otherwise load mid-answer (measured: a 12.4s stall between two tokens).
+
+Each module carries a runnable self-check: `python <module>.py`. Known red:
+`sentinel_stream.py` fails one assertion on "393 orders above $100,000" — a
+pre-existing false negative, reproducible on HEAD, documented at the assertion.
+
+    .venv/bin/python -m pytest -q                    # 90 passed, 9 skipped
+    .venv/bin/python calibrate_sentinel.py           # full sweep, ~20 min
+    .venv/bin/python calibrate_sentinel.py --report-only   # re-sweep the cache
 
 ---
 

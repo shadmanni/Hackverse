@@ -11,6 +11,7 @@ So we derive them here, once, and check the model against them. Nothing in the
 UI or the API may hardcode a metric that this module can compute.
 """
 
+import calendar
 import json
 import re
 import statistics
@@ -504,12 +505,238 @@ def bound_metrics(text: str, window: int = 200) -> list:
     recent = text[-window:].lower()
     hits = [(len(k), recent.rfind(k), k) for k in metric_aliases() if k in recent]
     if not hits:
-        return []
+        # The alias table only knows the phrasings it was tuned against, and a
+        # paraphrase it does not cover binds NOTHING - which silently downgrades
+        # a metric-scoped check to the whole-log one, where ~189 numbers are
+        # admissible and 80% of integers 1-30 pass (see audit_figures). That is a
+        # false negative produced by vocabulary, not by evidence.
+        return list(_semantic_metrics(recent)) if EMBED_BINDING else []
     specific = [h for h in hits if h[2] not in _GENERIC_ALIASES]
     # Specific phrases first, each ordered as bound_metric would rank them.
     return [h[2] for h in sorted(specific, reverse=True)] + [
         h[2] for h in sorted((h for h in hits if h[2] in _GENERIC_ALIASES), reverse=True)
     ]
+
+
+# DEFAULT OFF, on measured evidence rather than on the mechanism being wrong.
+#
+# The synthetic ablation below is favourable: at 0.45 the fallback binds 22% of
+# paraphrases the substring matcher misses, for 1 false binding in 240. But that
+# set is hand-written, and the question that decides a default is not "does it
+# work on spans I composed" - it is "what does it do to the answers the model
+# actually produces against THIS log".
+#
+# Measured on all 101 answers from data/calibration_raw.json, scored at end of
+# stream with the flag flipped and nothing else changed:
+#
+#     EMBED_BINDING=True    false positives 1/52    misses 1/49
+#     EMBED_BINDING=False   false positives 0/52    misses 1/49
+#
+# One false positive bought, zero detections gained. The FP is a TRUE sentence -
+# "38 out of 150 orders, or 25%, were flagged as supply chain bottlenecks" -
+# where the embedding bound 38 to `high value orders` (cosine over "38 out of 150
+# orders...", which names no metric the substring table knows) and 38 is not a
+# high-value figure, so a correct answer halts and the refutation names a metric
+# the sentence never mentioned.
+#
+# The paraphrases it recovers are real; they just do not occur in what granite
+# generates here, because the grounding prompt makes it quote the aggregate block
+# nearly verbatim. On a corpus where the model paraphrases more freely this would
+# earn its place - so the code stays, measured, one flag from being on.
+#
+# `cm.EMBED_BINDING = True` re-enables it. Re-measure with
+# `calibrate_sentinel.py --report-only` before trusting it on a different log.
+EMBED_BINDING = False
+
+# Swept, not guessed - see binding_ablation(). 18 paraphrases and 30 non-metric
+# spans, each carried by eight figure tails (144 positive / 240 negative spans):
+# 0.35 binds 51% of the paraphrases but falsely binds 7.5% of the negatives, 0.40
+# still binds "the inventory holding time averaged 12.5 days" to compliance cycle
+# time. 0.45 recovers 22% of paraphrases that bound nothing at all before.
+#
+# 0.45 is NOT zero-false, and an earlier revision of this comment claimed it was
+# on the strength of a 10-subject negative set. Widened to 30 subjects it is
+# 1/240: "the truck maintenance interval averaged 12.5 days" peaks at 0.455
+# against compliance cycle time. 0.50 is the first genuinely zero-false step, but
+# it drops recall to 8.3%, so the miss is kept and named rather than tuned away.
+#
+# A false binding is the expensive error here: it narrows the admissible set for a
+# figure about something the log does not measure, and halts the stream on it
+# while naming the wrong metric in the refutation. Measured, that halt is not a
+# false positive on a TRUE statement - 20 true statements built from the log and
+# phrased past the substring matcher produced zero new halts - the damage is
+# confined to the refutation naming a metric the model never mentioned.
+# Missing a binding only leaves the behaviour that shipped.
+EMBED_BINDING_THRESHOLD = 0.45
+
+# The figure itself is noise for a METRIC match, and it is always present -
+# bound_metrics is only ever called on the span around a matched numeral. Encoded
+# raw, "...payment receipt is 19 days" scores 0.381 against "order-to-cash" where
+# the bare paraphrase scores 0.464, i.e. the digits push correct bindings under
+# the threshold. At tau=0.45 stripping takes recall from 13.9% to 22.2%.
+#
+# It is also what buys the single false binding: the raw span is 0/240 on the
+# negatives, stripped is 1/240. The trade is +8.3 points of recall for one
+# wrong-metric refutation, taken because a missed binding silently downgrades a
+# figure to the whole-log check that 80% of small integers pass.
+_EMBED_NOISE = re.compile(r"[\d.,$%]+")
+
+
+@lru_cache(maxsize=1)
+def _alias_index(path: str = str(DATA_PATH)):
+    """(encoder, aliases, alias embeddings), or None when the model is absent."""
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        # Already a dependency and already in the local HF cache (phase3 uses the
+        # same name), so this adds no download to the offline demo.
+        # ponytail: a SECOND MiniLM in the process, ~90 MB and 6.3 s to build,
+        # because celonis_metrics cannot import phase3_rag_retriever without
+        # opening Milvus Lite - which is single-process. main._load_models calls
+        # this at startup so the 6.3 s is not paid mid-decode; the duplicate 90 MB
+        # remains. Upgrade path: hand it retriever.encoder instead of building.
+        enc = SentenceTransformer("all-MiniLM-L6-v2")
+        keys = tuple(metric_aliases(path))
+        return enc, keys, enc.encode(list(keys), normalize_embeddings=True)
+    except Exception as err:
+        # Never raise: a moved model file must cost recall, not the demo.
+        print(f"[celonis_metrics] semantic metric binding OFF, substring only ({err})")
+        return None
+
+
+@lru_cache(maxsize=256)
+def _semantic_metrics(span: str, path: str = str(DATA_PATH)) -> tuple:
+    """
+    Aliases whose meaning matches `span`, best-first. Empty when none clears the
+    threshold or the encoder is unavailable.
+
+    EVERY alias above the threshold is returned, not the argmax. That is
+    load-bearing: _ungrounded_number accepts a figure that ANY bound metric
+    admits, so extra candidates can only widen the admissible set. A mis-RANKED
+    binding therefore cannot manufacture a halt, while returning the argmax alone
+    could - it would drop the correct metric whenever a wrong one scored higher.
+    """
+    idx = _alias_index(path)
+    if idx is None:
+        return ()
+    enc, keys, mat = idx
+    # Cached for REPEATED queries, not within one response: measured over a
+    # 4-figure response the cache takes 0 hits, because every figure sits in a
+    # different span and the end-of-stream audit_figures rescan sees longer tails
+    # than the mid-decode pass did. So the honest streaming cost is a miss every
+    # time - 7-25 ms per figure warm, 111 ms total across that response - not the
+    # 0 ms a re-queried span reports. Warm-up lives in main._load_models.
+    sims = enc.encode(_EMBED_NOISE.sub(" ", span), normalize_embeddings=True) @ mat.T
+    hits = sorted(((float(s), k) for s, k in zip(sims, keys)
+                   if s >= EMBED_BINDING_THRESHOLD), reverse=True)
+    return tuple(k for _, k in hits)
+
+
+def binding_ablation(out_path: Optional[str] = None) -> list:
+    """
+    Sweep the cosine threshold over a labelled set and write the table.
+
+    The positives are paraphrases the substring matcher misses entirely; the
+    negatives name quantities the event log has no metric for, so binding them at
+    all is a false positive.
+
+    Every span is swept once per FIGURE TAIL rather than bare, because bound_metrics
+    only ever sees the span around a matched numeral and the trailing figure moves
+    cosine by ~0.08. Swept bare, the table reports a threshold the runtime never
+    operates at.
+    """
+    paraphrases = (
+        ("how long does the sign-off step take on average", ("invoice approved",)),
+        ("the average duration of the audit check step", ("compliance review", "compliance cycle time")),
+        ("how many regulatory inspections were logged", ("compliance review", "compliance cycle time")),
+        ("the typical turnaround for approving a bill", ("invoice approved",)),
+        ("how long from requisition creation to completion", ("purchase order",)),
+        ("the mean elapsed days for the procurement request step", ("purchase order",)),
+        ("average days spent on the conformance audit", ("compliance review", "compliance cycle time")),
+        ("the end-to-end duration from order placement to payment receipt", ("order-to-cash", "order to cash")),
+        ("how long the whole quote-to-cash journey takes", ("order-to-cash", "order to cash")),
+        ("average time for the regulatory sign-off stage", ("compliance review", "compliance cycle time")),
+        ("the mean delay on the congestion-flagged shipments", ("bottleneck",)),
+        ("how many shipments were marked as blocked in the chain", ("bottleneck",)),
+        ("average processing days across the process", ("cycle time",)),
+        ("the typical elapsed duration per case", ("cycle time",)),
+        ("mean days for large-ticket purchases above the threshold",
+         ("high value", "high-value", "high value orders", "high-value orders")),
+        ("how many big-money transactions are in the log",
+         ("high value", "high-value", "high value orders", "high-value orders")),
+        ("the average completion time for the compliance audit stage", ("compliance review", "compliance cycle time")),
+        ("how long does the billing approval stage last", ("invoice approved",)),
+    )
+    negatives = (
+        "the off-contract discount for warehouse node W-99",
+        "the vendor sign-off date",
+        "the inventory holding time",
+        "the customer satisfaction score for the quarter",
+        "the number of employees in the warehouse team",
+        "the freight insurance premium per shipment",
+        "the shelf life of the perishable stock",
+        "the training hours completed by staff",
+        "the office rent for the regional branch",
+        "the currency exchange rate applied",
+        # Everything below was added after the 10-subject set reported 0.45 as
+        # zero-false. It is not: "the truck maintenance interval" clears it. A
+        # negative set small enough to be clean is measuring itself, not tau.
+        "the carbon emissions per shipment",
+        "the warehouse floor area",
+        "the number of support tickets raised",
+        "the marketing spend for the campaign",
+        "the staff overtime hours",
+        "the packaging cost per unit",
+        "the fuel surcharge",
+        "the driver headcount",
+        "the customs clearance fee",
+        "the return rate for damaged goods",
+        "the supplier credit rating",
+        "the annual software licence cost",
+        "the truck maintenance interval",
+        "the call centre wait time",
+        "the employee attrition rate",
+        "the electricity usage",
+        "the number of parking spaces",
+        "the pallet stacking height",
+        "the security badge count",
+        "the cafeteria budget",
+    )
+    tails = (" is 19 days", " was 3 days on average", " totalled 41 events",
+             " averaged 12.5 days", " came to 460", " reached 150",
+             " stood at 10.4 days", " hit 25.33 percent")
+    idx = _alias_index()
+    if idx is None:
+        return []
+    enc, keys, mat = idx
+    spans = [_EMBED_NOISE.sub(" ", (p + t).lower())
+             for t in tails for p, _ in paraphrases] + [
+             _EMBED_NOISE.sub(" ", (n + t).lower())
+             for t in tails for n in negatives]
+    wanted = [set(w) for _ in tails for _, w in paraphrases]
+    sims = enc.encode(spans, normalize_embeddings=True) @ mat.T
+
+    rows = []
+    for step in range(11):
+        th = round(0.30 + 0.05 * step, 2)
+        correct = sum(1 for i, want in enumerate(wanted)
+                      if {k for j, k in enumerate(keys) if sims[i][j] >= th} & want)
+        false = sum(1 for i in range(len(wanted), len(spans))
+                    if any(sims[i][j] >= th for j in range(len(keys))))
+        rows.append({
+            "threshold": th,
+            "correct_binding_rate": round(correct / len(wanted), 3),
+            "false_binding_rate": round(false / (len(spans) - len(wanted)), 3),
+            "correct": correct, "positives": len(wanted),
+            "false": false, "negatives": len(spans) - len(wanted),
+        })
+    out = Path(out_path or BASE_DIR / "data" / "metric_binding_ablation.json")
+    out.write_text(json.dumps(
+        {"model": "all-MiniLM-L6-v2", "chosen_threshold": EMBED_BINDING_THRESHOLD,
+         "span_form": "paraphrase + figure tail, digits stripped - what "
+                      "bound_metrics actually receives",
+         "figure_tails": list(tails), "sweep": rows}, indent=2))
+    return rows
 
 
 def names_specific_metric(text: str, window: int = 200) -> bool:
@@ -596,6 +823,145 @@ def is_grounded_number(
     return False
 
 
+# Entity ids are recognised by SHAPE, not by membership. That is the whole point:
+# "CC-9999" has to be recognised as naming a cost centre so the aggregation can
+# come back empty, which is the strongest refutation available - the log holds no
+# data for that entity, so every figure about it is fabricated whatever its value.
+# Matching only ids the log contains would silently drop that case back into the
+# whole-log check, where the figure passes.
+_ID_FILTERS = {
+    "cost_center": re.compile(r"\bCC-\d+\b", re.IGNORECASE),
+    "case_id": re.compile(r"\bCASE-\d+\b", re.IGNORECASE),
+}
+_MONTH_NUM = {name.lower(): n for n, name in enumerate(calendar.month_name) if name}
+_ISO_MONTH = re.compile(r"\b(20\d{2})-(0[1-9]|1[0-2])\b")
+_YEAR = re.compile(r"\b(20\d{2})\b")
+# The '$' is required, not optional. Without it "the cycle time is more than 3
+# days" was read as an amount bound of $3 and every event in the log matched it,
+# which turns a duration claim into a recognised money filter. An amount written
+# without its currency marker is simply not recognised, and an unrecognised
+# filter falls through to the check that already exists.
+_AMOUNT_BOUND = re.compile(
+    r"\b(above|over|exceeding|greater than|more than|in excess of|at least|"
+    r"below|under|less than|at most)\s+\$\s?([\d][\d,]*(?:\.\d+)?)", re.IGNORECASE)
+_LOWER_BOUND_WORDS = {"above", "over", "exceeding", "greater than", "more than",
+                      "in excess of", "at least"}
+
+
+@lru_cache(maxsize=8)
+def _log_values(field: str, path: str = str(DATA_PATH)) -> tuple:
+    """Every value `field` actually takes in the log."""
+    return tuple(sorted({e[field] for e in load_events(path) if e.get(field)}))
+
+
+def _query_filters(text: str, path: str = str(DATA_PATH)) -> Dict[str, Any]:
+    """Filters a claim names, empty when it names none."""
+    low = (text or "").lower()
+    f: Dict[str, Any] = {}
+    for name, pat in _ID_FILTERS.items():
+        m = pat.search(text or "")
+        if m:
+            f[name] = m.group().upper()
+    # Departments and activities are matched against the values the log actually
+    # holds, so an unrecognised one falls through to the existing check instead of
+    # aggregating over a filter nothing can satisfy. Longest wins, as in
+    # bound_metric.
+    for field in ("department", "activity"):
+        named = [v for v in _log_values(field, path) if v.lower() in low]
+        if named:
+            f[field] = max(named, key=len)
+    # One entity's name can sit inside another's. "Supply Chain" is a department
+    # AND the prefix of the activity "Supply Chain Bottleneck Flagged", so naming
+    # only the activity also matched the department, and the two filters together
+    # matched 13 of that activity's 38 events. A caller checking the true figure
+    # 38 against 13 would refuse a correct statement. Dropping the contained name
+    # always widens the match, which is the safe direction for this layer.
+    if (f.get("department") and f.get("activity")
+            and f["department"].lower() in f["activity"].lower()):
+        del f["department"]
+    iso = _ISO_MONTH.search(text or "")
+    if iso:
+        f["year"], f["month"] = int(iso.group(1)), int(iso.group(2))
+    else:
+        for name, n in _MONTH_NUM.items():
+            # "may" is a modal verb far more often than a month in model prose -
+            # "the figure may be 3 days" must not become a May filter.
+            if name == "may" and not re.search(r"\bmay\s+20\d{2}\b", low):
+                continue
+            if re.search(rf"\b{name}\b", low):
+                f["month"] = n
+                break
+        year = _YEAR.search(text or "")
+        if year:
+            f["year"] = int(year.group(1))
+    amount = _AMOUNT_BOUND.search(text or "")
+    if amount:
+        key = ("min_amount_usd" if amount.group(1).lower() in _LOWER_BOUND_WORDS
+               else "max_amount_usd")
+        f[key] = float(amount.group(2).replace(",", ""))
+    return f
+
+
+def _event_matches(ev: Dict[str, Any], f: Dict[str, Any]) -> bool:
+    ts = ev.get("timestamp") or ""
+    amt = ev.get("amount_usd")
+    return (
+        ("cost_center" not in f or ev.get("cost_center") == f["cost_center"])
+        and ("case_id" not in f or ev.get("case_id") == f["case_id"])
+        and ("department" not in f or ev.get("department") == f["department"])
+        and ("activity" not in f or ev.get("activity") == f["activity"])
+        and ("year" not in f or ts[:4] == str(f["year"]))
+        and ("month" not in f or ts[5:7] == f"{f['month']:02d}")
+        and ("min_amount_usd" not in f or (amt is not None and amt >= f["min_amount_usd"]))
+        and ("max_amount_usd" not in f or (amt is not None and amt <= f["max_amount_usd"]))
+    )
+
+
+def live_process_query(text: str, path: str = str(DATA_PATH)) -> Optional[Dict[str, Any]]:
+    """
+    Aggregate the log under the filters a claim names, or None if it names none.
+
+    groundable_numbers and metric_statistics are precomputed over the WHOLE log
+    or per activity, so they know nothing about a CONDITIONAL claim:
+
+        "the average approval delay for cost center CC-3305 in March was 3 days"
+
+    Today that is checked against the whole log, where 3 is some event's
+    cycle_time_days, so it passes. The honest check is to run the filtered
+    aggregation and compare against what came back.
+
+    matched_events == 0 is the strongest result the log can give: the claim named
+    a real-looking entity that does not exist in it (CC-9999, a month outside the
+    extract), so NO figure about it is grounded, whatever its value.
+
+    Returns None when nothing was recognised, so callers fall through to the
+    existing behaviour unchanged.
+    """
+    f = _query_filters(text, path)
+    if not f:
+        return None
+    rows = [e for e in load_events(path) if _event_matches(e, f)]
+    cycles = [e["cycle_time_days"] for e in rows if e.get("cycle_time_days") is not None]
+    amounts = [e["amount_usd"] for e in rows if e.get("amount_usd") is not None]
+    return {
+        "filters": f,
+        "matched_events": len(rows),
+        "values": {
+            "count": len(rows),
+            # Events are not orders - process_profile carries the same warning.
+            # "393 orders above $100,000" over a log of 150 cases was fed to the
+            # model and then accepted as grounded; a filtered count must expose
+            # both populations or it repeats that bug per cost centre.
+            "cases": len({e["case_id"] for e in rows if e.get("case_id")}),
+            "mean_cycle_days": round(statistics.mean(cycles), 2) if cycles else None,
+            "max_cycle_days": max(cycles) if cycles else None,
+            "min_cycle_days": min(cycles) if cycles else None,
+            "mean_amount_usd": round(statistics.mean(amounts), 2) if amounts else None,
+            "total_amount_usd": round(sum(amounts), 2) if amounts else None,
+        },
+    }
+
+
 def ground_truth_answer(query: str, path: str = str(DATA_PATH)) -> str:
     """Deterministic answer assembled from the log, used for autonomous recovery."""
     p = process_profile(path)
@@ -632,6 +998,85 @@ def ground_truth_answer(query: str, path: str = str(DATA_PATH)) -> str:
     )
 
 
+def demo() -> None:
+    """Self-check for semantic metric binding and live conditional queries."""
+    import time
+
+    global EMBED_BINDING
+
+    # --- live conditional queries -----------------------------------------
+    q = live_process_query("the mean cycle time for cost center CC-3305")
+    assert q["filters"] == {"cost_center": "CC-3305"}, q["filters"]
+    assert q["matched_events"] == 124, q["matched_events"]
+    rows = [e for e in load_events() if e["cost_center"] == "CC-3305"]
+    assert q["values"]["mean_cycle_days"] == round(
+        statistics.mean(e["cycle_time_days"] for e in rows), 2)
+    assert q["values"]["cases"] < q["values"]["count"], "orders are not events"
+
+    # The money case: a real-looking entity the log has never seen. Any figure
+    # about it is fabricated, so the caller may refuse it without comparing.
+    ghost = live_process_query("approvals for cost center CC-9999 averaged 3 days")
+    assert ghost["matched_events"] == 0 and ghost["values"]["mean_cycle_days"] is None
+
+    # Filters compose, and an unfiltered sentence must stay None so callers keep
+    # their existing behaviour.
+    both = live_process_query("Compliance Review in the Finance department")
+    assert both["filters"] == {"department": "Finance", "activity": "Compliance Review"}
+    assert 0 < both["matched_events"] < 122
+    assert live_process_query("the mean compliance cycle time is 10.4 days") is None
+    assert live_process_query("the figure may be 3 days") is None, "'may' is not May"
+    assert live_process_query("the cycle time is more than 3 days") is None, \
+        "an amount bound needs its currency marker"
+
+    # A true statement about an activity whose name contains a department name
+    # must still aggregate over the whole activity.
+    nested = live_process_query("'Supply Chain Bottleneck Flagged' occurs 38 times")
+    assert nested["matched_events"] == 38, nested["filters"]
+    assert nested["values"]["mean_cycle_days"] == 12.47
+
+    t0 = time.perf_counter()
+    for _ in range(50):
+        live_process_query("cost center CC-3305 in March 2026")
+    print(f"live_process_query: {(time.perf_counter() - t0) / 50 * 1000:.2f} ms/call "
+          f"over {len(load_events())} events")
+
+    # --- semantic metric binding ------------------------------------------
+    if _alias_index() is None:
+        print("semantic binding unavailable - substring-only, self-check skipped")
+        return
+    print(json.dumps(binding_ablation(), indent=2))
+
+    # Spans carry a figure because that is the only shape bound_metrics is called
+    # on - see binding_ablation.
+    paraphrase = "a total of 41 regulatory inspections were logged"
+    EMBED_BINDING = False
+    assert bound_metrics(paraphrase) == [], "substring binding must still miss this"
+    EMBED_BINDING = True
+    assert "compliance review" in bound_metrics(paraphrase), "the fallback must recover it"
+    # A quantity the log has no metric for must bind nothing: binding it would
+    # narrow the check for a figure the log cannot speak to at all, and name the
+    # wrong metric when refusing it.
+    assert bound_metrics("the off-contract discount for warehouse node W-99 was 12") == []
+    assert bound_metrics("the inventory holding time averaged 12.5 days") == []
+    # The one negative that DOES bind at this threshold, asserted so it stays
+    # visible instead of being rediscovered live. It halts a figure the log
+    # genuinely cannot ground, so no true statement is refused - but the
+    # refutation names a metric the sentence never mentioned. See
+    # EMBED_BINDING_THRESHOLD for why 0.50 is not the answer.
+    assert bound_metrics("the truck maintenance interval averaged 12.5 days") == [
+        "compliance cycle time"], "known miss changed - re-run binding_ablation()"
+
+    hot = "the average completion time for the compliance audit stage was 9 days"
+    t0 = time.perf_counter()
+    _semantic_metrics(hot)
+    cold = (time.perf_counter() - t0) * 1000
+    t0 = time.perf_counter()
+    for _ in range(50):
+        _semantic_metrics(hot)
+    print(f"_semantic_metrics: {cold:.1f} ms cold, "
+          f"{(time.perf_counter() - t0) / 50 * 1000:.3f} ms cached")
+
+
 if __name__ == "__main__":
     p = process_profile()
     print(json.dumps(p, indent=2))
@@ -655,5 +1100,8 @@ if __name__ == "__main__":
     # Word boundaries: "count" must not match inside "accounts".
     assert bound_statistic("Compliance Review accounts for 460 events") is None
 
+    demo()
+
     print("\nself-check OK: 4.2 and 42.8 ungroundable; declared + derived metrics "
-          "groundable; unit narrowing separates 16 days from 16 events")
+          "groundable; unit narrowing separates 16 days from 16 events; paraphrases "
+          "bind semantically and conditional claims are aggregated live")

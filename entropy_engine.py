@@ -26,11 +26,16 @@ class EntropyEngine:
         self.alpha = alpha
         self.history: List[float] = []
         self.draft_extractor = DraftLogprobExtractor()
-        
+
         # Version 3: O(1) Exponential Moving Average (EMA) State Variables
         self.ema_mean: float = 0.0
         self.ema_var: float = 0.0
         self.count: int = 0
+
+        # Position within the current sentence, for the dynamic threshold below.
+        self.sentence_pos: int = 0
+        self.last_effective_tau: float = threshold_tau
+        self._relax_next: int = 0     # tokens of extra tolerance still owed
 
     STOPWORDS = {
         "the", "a", "an", "is", "are", "was", "were", "to", "of", "in", "for", 
@@ -106,6 +111,70 @@ class EntropyEngine:
 
         # 6. Baseline for general vocabulary
         return 1.0
+
+    # Phrases after which the next few tokens are legitimately high-entropy: the
+    # model is choosing how to CONTINUE, and there are many valid continuations.
+    # None of them can be part of a numeric claim, which is what makes relaxing
+    # after them safe.
+    TRANSITIONS = {
+        "however", "therefore", "additionally", "furthermore", "moreover",
+        "meanwhile", "consequently", "specifically", "notably", "overall",
+        "based", "according", "regarding", "although", "whereas", "while",
+    }
+
+    def effective_tau(self, token_weight: float) -> float:
+        """
+        DYNAMIC POSITION-AWARE THRESHOLD. tau is not one number; it is a number
+        per position, because uncertainty means different things at different
+        points in a sentence.
+
+        At a sentence opening the model is choosing between "From", "The",
+        "According", "Across" - all valid, so none holds much probability, and
+        the flat distribution says nothing at all about truth. That is not a
+        hypothesis: SentinelStream.breach_run exists because a clean query halted
+        on token 0, and a correct refusal halted mid-sentence after a
+        connective. `breach_run` handles both by requiring a RUN of breaches,
+        which works but is blunt - it delays every detection by a token, including
+        the ones on figures where the first breach was already conclusive.
+
+        Raising tau exactly where uncertainty is structurally expected is the
+        sharper instrument: it buys the same false-positive suppression without
+        making a figure wait for a second breach.
+
+        The relaxation is WITHDRAWN for high-stakes tokens. A digit in the first
+        position of a sentence is still a claim about the world - "10.4 days is
+        the mean" opens on a figure - and the whole point of the token taxonomy
+        is that figures get LESS tolerance, not more. So the two rules compose in
+        the order that keeps the strict one winning.
+        """
+        # A figure, a currency amount or an identifier is never given slack for
+        # where it happens to sit.
+        if token_weight >= 2.2:
+            return self.tau
+        # Opening tokens, decaying back to the calibrated tau by position 3.
+        relax = {0: 2.0, 1: 1.5, 2: 1.2}.get(self.sentence_pos, 1.0)
+        if self._relax_next > 0:
+            relax = max(relax, 1.5)
+        return self.tau * relax
+
+    def _advance_position(self, token: str) -> None:
+        """Track where in the sentence the next token will sit."""
+        clean = (token or "").strip().lower().strip(".,;:()")
+        if self._relax_next > 0:
+            self._relax_next -= 1
+        if clean in self.TRANSITIONS:
+            # The two tokens after a connective are still choosing a direction.
+            self._relax_next = 2
+        # A sentence ends on terminal punctuation that is not a decimal point;
+        # the digit guard matters because "10.4" must not reset the position and
+        # hand the tokens after it an opening-of-sentence discount.
+        stripped = (token or "").strip()
+        if stripped and stripped[-1] in ".!?\n" and not stripped[-1:].isdigit() and len(stripped) > 1:
+            self.sentence_pos = 0
+        elif stripped in {".", "!", "?", "\n"}:
+            self.sentence_pos = 0
+        else:
+            self.sentence_pos += 1
 
     def compute_contrastive_pmi(
         self,
@@ -191,7 +260,16 @@ class EntropyEngine:
         raw_uncertainty = (1.0 - prob) + (2.0 * rolling_variance) + (0.45 * pmi_penalty)
         weighted_uncertainty_score = raw_uncertainty * token_weight
 
-        is_hallucinating = weighted_uncertainty_score > self.tau
+        # Compared against the POSITION-AWARE threshold rather than the flat one.
+        # The score is returned unchanged so every existing caller - the
+        # calibration sweep, the benchmark, the UI plot - keeps reading the same
+        # quantity on the same scale; only the verdict moves. The threshold that
+        # produced the verdict is exposed for the audit trail, because "this
+        # breached" is not a checkable claim without the number it breached.
+        eff_tau = self.effective_tau(token_weight)
+        self.last_effective_tau = eff_tau
+        is_hallucinating = weighted_uncertainty_score > eff_tau
+        self._advance_position(token)
 
         return is_hallucinating, weighted_uncertainty_score, rolling_variance
 
@@ -325,3 +403,57 @@ class EntropyEngine:
         self.ema_mean = 0.0
         self.ema_var = 0.0
         self.count = 0
+        self.sentence_pos = 0
+        self._relax_next = 0
+        self.last_effective_tau = self.tau
+
+
+def demo() -> None:
+    """Self-check: the dynamic threshold must relax prose and never relax figures."""
+    e = EntropyEngine(threshold_tau=0.65)
+
+    # Sentence opening: many valid first words, so the bar is higher there.
+    assert e.effective_tau(1.0) == 0.65 * 2.0
+    e._advance_position("The")
+    assert e.effective_tau(1.0) == 0.65 * 1.5
+    e._advance_position("mean")
+    e._advance_position("cycle")
+    e._advance_position("time")
+    assert e.effective_tau(1.0) == 0.65          # back to the calibrated value
+
+    # A figure never gets the discount, wherever it sits. This is the rule that
+    # keeps the relaxation from opening a hole: an answer opening on a number
+    # ("10.4 days is the mean") must be judged at full strictness.
+    fresh = EntropyEngine(threshold_tau=0.65)
+    assert fresh.sentence_pos == 0
+    assert fresh.effective_tau(3.5) == 0.65
+
+    # A decimal point must not be read as the end of a sentence, or every token
+    # after a figure gets an opening-of-sentence discount.
+    d = EntropyEngine(threshold_tau=0.65)
+    for t in ("The", "mean", "is", "10.4"):
+        d._advance_position(t)
+    assert d.sentence_pos == 4, d.sentence_pos
+
+    # ...while a real full stop does reset it.
+    d._advance_position(" days.")
+    assert d.sentence_pos == 0, d.sentence_pos
+
+    # A connective buys the following tokens tolerance, because the model is
+    # choosing a direction and there are many valid ones.
+    c = EntropyEngine(threshold_tau=0.65)
+    for t in ("Compliance", "review", "is", "slow."):
+        c._advance_position(t)
+    c._advance_position("However")
+    assert c.effective_tau(1.0) >= 0.65 * 1.5
+
+    # The score itself is unchanged by any of this - only the verdict moves - so
+    # every existing caller keeps reading the same quantity.
+    v = EntropyEngine(threshold_tau=0.65)
+    _, score, _ = v.evaluate_token("the", logprob=-0.1)
+    assert abs(score - (1.0 - math.exp(-0.1)) * 0.40) < 1e-6, score
+    print("entropy_engine self-check OK")
+
+
+if __name__ == "__main__":
+    demo()
