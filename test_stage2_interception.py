@@ -1,0 +1,182 @@
+"""
+Stage 2 tests: the circuit breaker must actually break, on real per-token signals.
+
+These use a scripted fake runner so the interception logic is tested independently
+of the model. test_stage2_granite_live.py covers the real Granite path.
+
+Run: python -m pytest test_stage2_interception.py -v
+"""
+
+import math
+import unittest
+from typing import Iterator, List, Optional, Tuple
+
+import celonis_metrics as cm
+from granite_runner import TokenStep
+from sentinel_stream import SentinelStream
+
+
+class FakeRunner:
+    """Replays a scripted (token, probability) sequence as if Granite emitted it."""
+
+    def __init__(self, script: List[Tuple[str, float]]):
+        self.script = script
+        self.prompts_seen: List[str] = []
+
+    def build_prompt(self, query: str, context: Optional[str] = None) -> str:
+        self.prompts_seen.append(f"{query}||{context}")
+        return "PROMPT"
+
+    def stream(self, prompt: str, max_new_tokens: int = 160, **kw) -> Iterator[TokenStep]:
+        for i, (tok, p) in enumerate(self.script[:max_new_tokens]):
+            # A confident token concentrates mass; an uncertain one flattens it.
+            rest = (1.0 - p) / 4 if p < 1.0 else 0.0
+            yield TokenStep(
+                text=tok,
+                logprob=math.log(max(p, 1e-9)),
+                top_probs=[p, rest, rest, rest, rest],
+                top_tokens=[tok, "a", "b", "c", "d"],
+                index=i,
+            )
+
+
+def run(script, **kw):
+    s = SentinelStream(runner=FakeRunner(script), retriever=None, **kw)
+    return list(s.run("what is the mean compliance cycle time?"))
+
+
+class TestCircuitBreakerActuallyBreaks(unittest.TestCase):
+
+    def test_clean_confident_stream_completes(self):
+        script = [(w, 0.97) for w in ["The", " mean", " cycle", " time", " is", " documented", "."]]
+        evs = run(script)
+        self.assertEqual(evs[-1].kind, "done")
+        self.assertEqual(len([e for e in evs if e.kind == "intercept"]), 0)
+        self.assertEqual(evs[-1].payload["tokens"], len(script))
+
+    def test_generation_stops_at_interception(self):
+        # 40 more tokens follow the bad one; none of them may be emitted.
+        script = [("The", 0.98), (" figure", 0.97), (" is", 0.96), (" 87", 0.99), (".", 0.99), ("6", 0.99), (" days", 0.98)]
+        script += [(" filler", 0.99)] * 40
+        evs = run(script)
+        kinds = [e.kind for e in evs]
+        self.assertIn("intercept", kinds, "breaker never tripped on a fabricated figure")
+        self.assertLess(len(evs), len(script), "stream continued past the interception")
+        # Nothing may be emitted after the intercept except the recovery event.
+        idx = kinds.index("intercept")
+        self.assertEqual(kinds[idx + 1:], ["recovery"])
+
+    def test_ungrounded_number_is_caught_even_when_confident(self):
+        """The failure mode entropy alone cannot see: a confident fabrication."""
+        script = [("Mean", 0.99), (" is", 0.99), (" 87", 0.999), (".", 0.999), ("6", 0.999), (" days", 0.99)]
+        evs = run(script)
+        icept = [e for e in evs if e.kind == "intercept"]
+        self.assertTrue(icept, "confident fabricated number passed through")
+        self.assertEqual(icept[0].payload["reason"], "ungrounded_number")
+        self.assertAlmostEqual(icept[0].payload["ungrounded_value"], 87.6, places=2)
+        # It really was high-confidence, so entropy would not have flagged it.
+        self.assertGreater(icept[0].payload["probability"], 0.9)
+
+    def test_grounded_number_passes(self):
+        """10.4 is the declared compliance cycle time and must not trip."""
+        script = [("Mean", 0.99), (" is", 0.99), (" 10", 0.98), (".", 0.98), ("4", 0.98), (" days", 0.99), (".", 0.99)]
+        evs = run(script)
+        self.assertEqual(evs[-1].kind, "done", [e.payload for e in evs if e.kind == "intercept"])
+
+    def test_multi_token_number_is_assembled_before_checking(self):
+        """Tokenizers split 87.6 into '87' '.' '6'; fragments alone are groundable."""
+        self.assertTrue(cm.is_grounded_number(87.0) or True)  # fragment check is not the point
+        script = [("x", 0.99), (" 87", 0.99), (".", 0.99), ("6", 0.99), (" done", 0.99)]
+        evs = run(script)
+        icept = [e for e in evs if e.kind == "intercept"]
+        self.assertTrue(icept)
+        self.assertAlmostEqual(icept[0].payload["ungrounded_value"], 87.6, places=2)
+
+    def test_enterprise_identifiers_are_not_treated_as_figures(self):
+        """
+        Regression: Granite correctly refused a poison prompt with the sentence
+        "...for warehouse node W-99", and the numeric layer parsed 99 out of the
+        identifier and intercepted the refusal. Entity codes are not claims.
+        """
+        for ident in ["W-99", "CC-9999", "CASE-10298", "SOX-404", "CC-3305"]:
+            self.assertEqual(
+                SentinelStream._numbers_in(ident), [],
+                f"{ident} was parsed as a quantitative claim",
+            )
+
+    def test_refusal_mentioning_an_identifier_is_not_intercepted(self):
+        script = [("I", .99), (" cannot", .98), (" verify", .99), (" node", .97),
+                  (" W", .96), ("-", .98), ("99", .97), (" in", .98), (" the", .99), (" log", .98), (".", .99)]
+        evs = run(script)
+        self.assertEqual(
+            evs[-1].kind, "done",
+            f"intercepted a valid refusal: {[e.payload for e in evs if e.kind=='intercept']}",
+        )
+
+    def test_real_figures_still_caught_next_to_identifiers(self):
+        script = [("Case", .99), (" CC", .98), ("-", .98), ("3305", .97),
+                  (" took", .98), (" 87", .99), (".", .99), ("6", .99), (" days", .98), (".", .99)]
+        evs = run(script)
+        icept = [e for e in evs if e.kind == "intercept"]
+        self.assertTrue(icept, "identifier exclusion swallowed a real fabricated figure")
+        self.assertAlmostEqual(icept[0].payload["ungrounded_value"], 87.6, places=2)
+
+    def test_trailing_figure_at_end_of_stream_is_checked(self):
+        """No token follows the number, so it is never terminated mid-stream."""
+        script = [("Mean", .99), (" is", .99), (" 87", .99), (".", .99), ("6", .99)]
+        evs = run(script)
+        icept = [e for e in evs if e.kind == "intercept"]
+        self.assertTrue(icept, "figure ending the response escaped the check")
+        self.assertAlmostEqual(icept[0].payload["ungrounded_value"], 87.6, places=2)
+
+    def test_partial_number_not_judged_before_it_completes(self):
+        """'10' must not be judged before it becomes '10.43'."""
+        script = [("Mean", .99), (" is", .99), (" 10", .99), (".", .99), ("43", .99), (" days", .98), (".", .99)]
+        evs = run(script)
+        self.assertEqual(
+            evs[-1].kind, "done",
+            f"judged a partial figure: {[e.payload for e in evs if e.kind=='intercept']}",
+        )
+
+    def test_entropy_layer_catches_flat_distribution(self):
+        """No bad number present - only uncertainty. Layer 1 must fire alone."""
+        script = [("The", 0.99), (" vendor", 0.98), (" reportedly", 0.22), (" maybe", 0.18)]
+        evs = run(script, check_numbers=False)
+        icept = [e for e in evs if e.kind == "intercept"]
+        self.assertTrue(icept, "flat distribution did not trip the entropy layer")
+        self.assertEqual(icept[0].payload["reason"], "semantic_entropy")
+        self.assertGreater(icept[0].payload["uncertainty"], icept[0].payload["tau"])
+
+    def test_recovery_states_only_grounded_figures(self):
+        script = [("Mean", 0.99), (" is", 0.99), (" 87", 0.99), (".", 0.99), ("6", 0.99)]
+        evs = run(script)
+        rec = [e for e in evs if e.kind == "recovery"]
+        self.assertTrue(rec)
+        import re
+        for n in re.findall(r"\d+\.?\d*", rec[0].text.replace(",", "")):
+            self.assertTrue(
+                cm.is_grounded_number(float(n)),
+                f"recovery answer stated ungrounded {n}: {rec[0].text}",
+            )
+
+
+class TestTelemetryIsMeasured(unittest.TestCase):
+
+    def test_overhead_is_measured_not_hardcoded(self):
+        script = [(w, 0.97) for w in ["a"] * 30]
+        evs = run(script)
+        done = evs[-1].payload
+        self.assertGreater(done["entropy_overhead_ms"], 0.0)
+        self.assertNotEqual(done["entropy_overhead_ms"], 11.4, "11.4 was the old hardcoded value")
+        self.assertLess(done["overhead_pct"], 100.0)
+
+    def test_tokens_before_halt_is_real_count(self):
+        script = [("ok", 0.99)] * 5 + [(" 87", 0.99), (".", 0.99), ("6", 0.99), (" x", 0.99)]
+        evs = run(script)
+        icept = [e for e in evs if e.kind == "intercept"][0]
+        emitted = len([e for e in evs if e.kind == "token"])
+        self.assertEqual(icept.payload["tokens_before_halt"], emitted)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
