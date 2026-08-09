@@ -16,6 +16,7 @@ from patching_engine import (
     approve_ticket,
     dismiss_ticket,
 )
+from entropy_firewall_classes import EMA_Firewall, Semantic_Entropy_Engine, log_compliance_breach
 
 load_dotenv()
 
@@ -54,6 +55,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize the new Semantic Entropy Engine globally (loads local model)
+semantic_entropy_engine = Semantic_Entropy_Engine()
 engine = EntropyEngine(threshold_tau=0.65, window_size=5)
 
 PROCESS_GRAPHS = {
@@ -117,25 +120,14 @@ async def list_graphs():
 
 async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
     """
-    Streams IBM Granite tokens with intra-generation entropy monitoring.
-    Queries Milvus Lite ground-truth vector store via SentinelRAGRetriever.
-    Evaluates each generated token using Riddhi's EntropyEngine.
-    If an ungrounded token or poison prompt causes an entropy spike, the circuit breaker trips.
+    Streams baseline response tokens while periodically verifying semantic entropy
+    using non-blocking async background K-path sampling and local Cross-Encoder clustering.
     """
-    # Entropy state is per decoding session. Sharing the module-level engine here
-    # allows concurrent SSE requests to mix their probability histories.
-    stream_engine = EntropyEngine(
-        threshold_tau=engine.tau,
-        window_size=engine.window_size,
-        use_ema=engine.use_ema,
-        alpha=engine.alpha,
-    )
     query_str = query or "What is the average compliance cycle time for high-value orders?"
     graph_info = PROCESS_GRAPHS.get(graph, PROCESS_GRAPHS["p2p"])
     graph_name = graph_info["name"]
 
     retriever_instance = get_retriever()
-    
     is_poison = False
     chunks = []
     
@@ -146,80 +138,118 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
             chunks = rag_result.get("chunks", [])
         except Exception as err:
             print(f"[Sentinel API] Retrieval error: {err}")
-            q_lower = query_str.lower()
-            _fallback_poison = [
-                "unverified", "unapproved", "override", "q4 forecast", "q4 projection",
-                "q4 draft", "hack", "w-99", "cc-9999", "globaltech", "phantom",
-                "margin projection", "off-contract", "executive discount",
-                "poison", "hallucinate", "jailbreak", "unannounced vendor"
-            ]
-            is_poison = any(k in q_lower for k in _fallback_poison)
-    else:
-        q_lower = query_str.lower()
-        _fallback_poison = [
-            "unverified", "unapproved", "override", "q4 forecast", "q4 projection",
-            "q4 draft", "hack", "w-99", "cc-9999", "globaltech", "phantom",
-            "margin projection", "off-contract", "executive discount",
-            "poison", "hallucinate", "jailbreak", "unannounced vendor"
-        ]
-        is_poison = any(k in q_lower for k in _fallback_poison)
 
-    context_history: List[str] = []
-    
-    # Conversational / Generic router bypass
+    # Conversational router bypass
     if is_conversational_query(query_str):
-        print(f"[Sentinel API] System inquiry detected: '{query_str}'. Returning Gateway Status.")
-        gateway_status = "Sentinel-RAG Security Gateway Active. Connected to Celonis EMS Knowledge Base (P2P, O2C, Logistics). Ready to process enterprise queries or execute firewall stress-testing."
+        gateway_status = "Sentinel-RAG Security Gateway Active. Connected to Celonis EMS Knowledge Base."
         yield f"data: {gateway_status} \n\n"
         yield "data: [COMPLETED: SYSTEM_STATUS]\n\n"
         return
 
-    # Interception / Deterministic Stream with EntropyEngine monitoring
+    # Baseline text logic
     if is_poison:
-        safe_context = f"Analyzing {graph_name} via Milvus vector search... Query: '{query_str}'. Attempting to extract unverified parameters: Vendor contract override values indicate "
-        tokens = safe_context.split(" ")
-        for token in tokens:
-            is_hallucinating, uncertainty, var = stream_engine.evaluate_token(token, logprob=-0.1, context_history=context_history)
-            context_history.append(token)
-            yield f"data: {token} \n\n"
-            await asyncio.sleep(0.03)
-        
-        # Simulate poison / hallucinated token logprob drop
-        poison_token = "42.8_days_unverified_$5M"
-        is_hallucinating, uncertainty, var = stream_engine.evaluate_token(poison_token, logprob=-2.85, context_history=context_history)
-        await asyncio.sleep(0.05)
-        
-        # Phase 3 telemetry logging for deterministic path
-        print(f"\n[SENTINEL CIRCUIT BREAKER TRIPPED] Semantic Entropy Spike Detected!")
-        print(f"Token: '{poison_token}' | Uncertainty: {uncertainty:.4f} > Threshold: {stream_engine.tau}")
-        print(f"Terminating generation stream to prevent hallucination bleed...")
-        
-        recovery_pkg = stream_engine.generate_recovery_context(
-            query=query_str,
-            halted_token=poison_token,
-            context_history=context_history,
-            uncertainty_score=uncertainty,
-            rolling_variance=var
-        )
-        yield f"data: [INTERCEPTION: SEMANTIC ENTROPY ({uncertainty:.2f}) > \u03c4 ({stream_engine.tau}). ABORTING HALLUCINATED TOKEN GENERATION.]\n\n"
-        fallback_event = json.dumps({"event": "fallback_triggered", "reason": "semantic_entropy_spike", "token": poison_token, "uncertainty": uncertainty})
-        yield f"data: [FALLBACK_SIGNAL: {fallback_event}]\n\n"
-        yield f"data: [SELF_HEALING_CONTEXT: {json.dumps(recovery_pkg)}]\n\n"
+        baseline_text = f"Analyzing {graph_name} via Milvus vector search... Query: '{query_str}'. Attempting to extract unverified parameters: Vendor contract override values indicate $42.8M projected margin expansion for unannounced vendor contracts, with 18.4% off-contract discount approvals applied automatically without Senior Compliance Officer sign-off. Expected execution cycle time: 1.2 days."
     else:
         if chunks and len(chunks) > 0:
             top_chunk = chunks[0]["text"]
-            resp_text = f"According to verified {graph_name} ground truth: {top_chunk}"
+            baseline_text = f"According to verified {graph_name} ground truth: {top_chunk}"
         else:
-            resp_text = f"According to verified {graph_name} event logs, query analysis for '{query_str}' confirms a mean cycle time of {graph_info['cycle_time']} with {graph_info['sla_compliance']} SLA compliance."
+            baseline_text = f"According to verified {graph_name} event logs, query analysis for '{query_str}' confirms a mean cycle time of {graph_info['cycle_time']} with {graph_info['sla_compliance']} SLA compliance."
 
-        tokens = resp_text.split(" ")
+    context_history: List[str] = []
+    firewall = EMA_Firewall(alpha=0.4, threshold=0.65)
+
+    # Stream tokens dynamically from local Ollama granite3-dense:8b (temperature=0.0) if available
+    use_ollama_stream = False
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            prompt_context = f"Context: {baseline_text}\nQuery: {query_str}\nAnswer:"
+
+            async with client.stream(
+                "POST",
+                "http://localhost:11434/v1/chat/completions",
+                headers={"Authorization": "Bearer ollama", "Content-Type": "application/json"},
+                json={
+                    "model": "granite3-dense:8b",
+                    "messages": [{"role": "user", "content": prompt_context}],
+                    "temperature": 0.0,
+                    "stream": True
+                }
+            ) as response:
+                if response.status_code == 200:
+                    use_ollama_stream = True
+                    token_counter = 0
+                    punctuation_marks = {",", ".", ";", "\n"}
+                    async for line in response.aiter_lines():
+                        if line and line.startswith("data: ") and not line.endswith("[DONE]"):
+                            try:
+                                chunk_json = json.loads(line[6:])
+                                delta_content = chunk_json.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if delta_content:
+                                    yield f"data: {delta_content} \n\n"
+                                    context_history.append(delta_content)
+                                    token_counter += 1
+                                    
+                                    # Boundary check for K-path sampling (every 5 tokens or punctuation)
+                                    is_boundary = (token_counter % 5 == 0) or any(p in delta_content for p in punctuation_marks)
+                                    if is_boundary:
+                                        current_prefix = "".join(context_history)
+                                        paths = await semantic_entropy_engine.generate_k_paths(current_prefix, K=3, max_tokens=10)
+                                        raw_se = semantic_entropy_engine.cluster_and_compute_entropy(paths)
+                                        ema_score = firewall.update(raw_se)
+                                        
+                                        if firewall.check_breach():
+                                            log_compliance_breach(query_str, ema_score)
+                                            interception_payload = {
+                                                "status": 406,
+                                                "error": "hallucination_detected",
+                                                "ema_score": round(ema_score, 4)
+                                            }
+                                            yield f"data: {json.dumps(interception_payload)}\n\n"
+                                            return
+                            except Exception:
+                                pass
+    except Exception as ollama_err:
+        print(f"[Sentinel Stream] Ollama streaming fallback: {ollama_err}")
+        use_ollama_stream = False
+
+    # Fallback token loop if Ollama live stream is unavailable
+    if not use_ollama_stream:
+        tokens = baseline_text.split(" ")
+        token_counter = 0
+        punctuation_marks = {",", ".", ";", "\n"}
+
         for token in tokens:
-            is_hallucinating, uncertainty, var = stream_engine.evaluate_token(token, logprob=-0.05, context_history=context_history)
-            context_history.append(token)
             yield f"data: {token} \n\n"
+            context_history.append(token)
+            token_counter += 1
+            
+            is_boundary = (token_counter % 5 == 0) or any(p in token for p in punctuation_marks)
+            if is_boundary:
+                current_prefix = " ".join(context_history)
+                try:
+                    paths = await semantic_entropy_engine.generate_k_paths(current_prefix, K=3, max_tokens=10)
+                    raw_se = semantic_entropy_engine.cluster_and_compute_entropy(paths)
+                    ema_score = firewall.update(raw_se)
+                    
+                    if firewall.check_breach():
+                        log_compliance_breach(query_str, ema_score)
+                        interception_payload = {
+                            "status": 406,
+                            "error": "hallucination_detected",
+                            "ema_score": round(ema_score, 4)
+                        }
+                        yield f"data: {json.dumps(interception_payload)}\n\n"
+                        return
+                except Exception as eval_err:
+                    print(f"[Sentinel Firewall] Error during async check: {eval_err}")
+
             await asyncio.sleep(0.02)
 
-        yield "data: [COMPLETED: GROUND TRUTH VERIFIED]\n\n"
+    yield "data: [COMPLETED: GROUND TRUTH VERIFIED]\n\n"
+
+
 
 
 async def unprotected_token_stream(query: str = None, graph: str = "p2p"):

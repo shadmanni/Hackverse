@@ -1,0 +1,110 @@
+[
+  {
+    "timestamp": "2026-08-09T04:27:08.200050+00:00",
+    "query_sha256": "0cc2a614dd7902ab4adaea8ad59a626c89539853c2211b329bbb8ec4ccd88b7b",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:27:08.232058+00:00",
+    "query_sha256": "0cc2a614dd7902ab4adaea8ad59a626c89539853c2211b329bbb8ec4ccd88b7b",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:27:08.264392+00:00",
+    "query_sha256": "0cc2a614dd7902ab4adaea8ad59a626c89539853c2211b329bbb8ec4ccd88b7b",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:27:08.410656+00:00",
+    "query_sha256": "0cc2a614dd7902ab4adaea8ad59a626c89539853c2211b329bbb8ec4ccd88b7b",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:27:08.589696+00:00",
+    "query_sha256": "0cc2a614dd7902ab4adaea8ad59a626c89539853c2211b329bbb8ec4ccd88b7b",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:27:08.929950+00:00",
+    "query_sha256": "0cc2a614dd7902ab4adaea8ad59a626c89539853c2211b329bbb8ec4ccd88b7b",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:28:31.219419+00:00",
+    "query_sha256": "0cc2a614dd7902ab4adaea8ad59a626c89539853c2211b329bbb8ec4ccd88b7b",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:28:31.281710+00:00",
+    "query_sha256": "0cc2a614dd7902ab4adaea8ad59a626c89539853c2211b329bbb8ec4ccd88b7b",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:28:33.643211+00:00",
+    "query_sha256": "0cc2a614dd7902ab4adaea8ad59a626c89539853c2211b329bbb8ec4ccd88b7b",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:28:33.690355+00:00",
+    "query_sha256": "0cc2a614dd7902ab4adaea8ad59a626c89539853c2211b329bbb8ec4ccd88b7b",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:28:47.395747+00:00",
+    "query_sha256": "114f423bb46183e9b92ce8d80182a5e085c0fff4f8b3d1789268b725e59bebff",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:28:47.435820+00:00",
+    "query_sha256": "114f423bb46183e9b92ce8d80182a5e085c0fff4f8b3d1789268b725e59bebff",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:29:39.991593+00:00",
+    "query_sha256": "d38f620345549b51f90da778ee6665dd3701674a0119a9ceaebf19bfcf9d1747",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:29:40.029237+00:00",
+    "query_sha256": "d38f620345549b51f90da778ee6665dd3701674a0119a9ceaebf19bfcf9d1747",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:29:52.517258+00:00",
+    "query_sha256": "255f26e79afdbe6ec33706ff0ef2c3d853368858cb8a18666aa9ed3a161caee6",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:29:52.563221+00:00",
+    "query_sha256": "255f26e79afdbe6ec33706ff0ef2c3d853368858cb8a18666aa9ed3a161caee6",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:30:07.618585+00:00",
+    "query_sha256": "ddff8c9abf422c55f0866eedf9cf66c50fa40f197cfaa9028b64b9710bf71c69",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  },
+  {
+    "timestamp": "2026-08-09T04:30:07.659765+00:00",
+    "query_sha256": "ddff8c9abf422c55f0866eedf9cf66c50fa40f197cfaa9028b64b9710bf71c69",
+    "action": "INTERCEPTED_AND_HALTED",
+    "ema_score": 0.9183
+  }
+]
