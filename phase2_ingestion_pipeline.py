@@ -59,10 +59,12 @@ PHONE_RE = re.compile(r"\+\d{1,3}[-\s]?\d{4,5}[-\s]?\d{4,5}")
 PII_SALT = os.getenv("SENTINEL_PII_SALT", "sentinel-demo-salt")
 
 try:
-    # DPK PII engine — wraps presidio_analyzer + presidio_anonymizer the same
-    # way dpk_pii_redactor's PIIRedactorTransform does internally.
-    from dpk_pii_engine import has_raw_pii, pseudonymise, redact_pii
-    PII_ENGINE = "dpk-presidio"
+    # DPK PII engine. Uses dpk_pii_redactor's own PIIAnalyzerEngine when the
+    # real package is installed, and DPK's Presidio construction minus Flair
+    # when it is not - backend_name() reports which, so PII_ENGINE names the
+    # engine that ran rather than the one that was hoped for.
+    from dpk_pii_engine import backend_name, has_raw_pii, pseudonymise, redact_pii
+    PII_ENGINE = backend_name()
 except ImportError:
     PII_ENGINE = "regex-fallback"
 
@@ -104,6 +106,8 @@ DATA_PATH = Path(__file__).parent / "data" / "mock_celonis_data_large.json"
 MILVUS_DB_PATH = str(Path(__file__).parent / "data" / "sentinel_milvus.db")
 COLLECTION_NAME = "celonis_ground_truth"
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"   # 384-dim, fast, runs on CPU
+# Written at ingest, read by /health: which engine actually redacted the vectors.
+PROVENANCE_PATH = Path(__file__).parent / "data" / "ingest_provenance.json"
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +260,21 @@ def build_pipeline(data_path=DATA_PATH, db_path=MILVUS_DB_PATH, collection_name=
     ]
     client.insert(collection_name=collection_name, data=rows)
 
+    # Provenance, because the question "was this redacted by DPK?" is about the
+    # COLLECTION, not about the process asking. The API server runs in a venv
+    # that deliberately has no DPK in it - importing this module there would
+    # always answer "regex-fallback" no matter what built the vectors. Recording
+    # it at ingest is the only place the answer is actually known.
+    PROVENANCE_PATH.write_text(json.dumps({
+        "pii_engine": PII_ENGINE,
+        "collection": collection_name,
+        "vectors": len(rows),
+        "source": str(data_path),
+        "embedding_model": EMBED_MODEL_NAME,
+    }, indent=2) + "\n")
+
     print(f"Inserted {len(rows)} vectors into collection '{collection_name}'.")
+    print(f"Provenance written to {PROVENANCE_PATH} (pii_engine={PII_ENGINE}).")
     return len(rows)
 
 

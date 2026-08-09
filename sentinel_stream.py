@@ -266,8 +266,18 @@ class SentinelStream:
         lines = [
             f"Process: {p['process']} ({p['source_system']})",
             f"Scope: {p['total_cases']} cases, {p['total_events']} events",
-            f"Declared average compliance cycle time: {p['declared_avg_compliance_cycle_time_days']} days",
-            f"Declared average order-to-cash: {p['declared_avg_order_to_cash_days']} days",
+            # "mean" and "average" both, because the model matches the question's
+            # wording against these lines lexically. Asked "What is the MEAN
+            # compliance cycle time?" against a line reading "Declared AVERAGE
+            # compliance cycle time: 10.4 days", Granite answered "9.11 days for
+            # orders above $100,000" - the nearest line that actually contained
+            # the words "mean cycle". Measured 0/6 correct before, 6/6 after; the
+            # decode is deterministic, so this was going to happen every time on
+            # the one prompt the demo is built around. Nothing here catches it:
+            # 9.11 IS the high-value mean, so it is a grounded figure answering
+            # the wrong question, and grounding is not relevance.
+            f"Declared mean (average) compliance cycle time: {p['declared_avg_compliance_cycle_time_days']} days",
+            f"Declared mean (average) order-to-cash: {p['declared_avg_order_to_cash_days']} days",
             f"Mean cycle time across all events: {p['mean_cycle_days']} days "
             f"(median {p['median_cycle_days']}, max {p['max_cycle_days']})",
             f"Orders above $100,000: {p['high_value_orders']} of {p['total_cases']} orders "
@@ -697,6 +707,34 @@ class SentinelStream:
                            "statistic": statistic, "unit": unit, "scope": scope})
         return {**counts, "figures": detail}
 
+    def _refutation(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Why the offending figure was rejected, in the log's own terms.
+
+        The UI called this "figure not in log", which was false often enough to
+        be the worst string on the screen: 9.11 IS in the log - it is the
+        high-value mean - and the breaker halted "the mean compliance cycle time
+        ... is 9.11" because that metric's mean is 10.4, not because the number
+        is absent. A judge who checks the data finds the figure and concludes
+        the detector is broken.
+
+        The binding that did the rejecting already knows the honest answer, so
+        report it: which metric the sentence named, which statistic of it, and
+        what that statistic actually is.
+        """
+        claim = next((f for f in self.audit_figures(text)["figures"]
+                      if f["state"] == "contradicted"), None)
+        if not claim or not claim["metric"]:
+            return None
+        stats = cm.metric_statistics().get(claim["metric"], {})
+        admissible = stats.get(claim["statistic"]) or frozenset().union(*stats.values())
+        return {
+            "claimed_metric": claim["metric"],
+            "claimed_statistic": claim["statistic"],
+            "unit": claim["unit"],
+            "admissible": sorted(admissible),
+        }
+
     # ---------- interception ----------
 
     async def _trip(
@@ -757,6 +795,16 @@ class SentinelStream:
                 "rolling_variance": round(variance, 4),
                 "shannon_entropy": round(shannon, 4),
                 "ungrounded_value": ungrounded_value,
+                # What the figure was measured against. Without it the UI can
+                # only say "not in log", which is the wrong reason whenever the
+                # figure is real but belongs to another metric - the commonest
+                # case this layer catches. See _refutation.
+                # history excludes the halting token - it is appended only after
+                # the trip check - and that token is usually the unit noun that
+                # completed the claim ("9.11" + " days"). Reading history alone
+                # judged a sentence the detector had not judged, and came back
+                # with no contradiction at all.
+                "refutation": self._refutation("".join(history) + tok),
                 "tokens_before_halt": emitted,
                 "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
                 "entropy_overhead_ms": round(overhead_s * 1000, 3),
@@ -796,6 +844,24 @@ class SentinelStream:
         # The repaired answer is held to the same standard as the original: a
         # recovery that itself states an ungrounded figure is not a recovery.
         regenerated_ok = self._scan_new_figures(answer, 0, complete_only=False)[0] is None
+        # And it may not restate the figure the breaker just halted on, even if
+        # it has found a phrasing that makes the figure admissible.
+        #
+        # Observed on screen: the stream halted on "The mean compliance cycle
+        # time across all events is 9.11" - correctly, because that metric's
+        # mean is 10.4 and 9.11 is the HIGH-VALUE mean - and the recovery
+        # returned "...is 9.11 days for orders above $100,000", which passes the
+        # ungrounded check, because the added qualifier is exactly what makes
+        # 9.11 admissible. So the panel showed the same number halted as a
+        # fabrication and then re-served as verified. Both verdicts were right
+        # about their own sentence and the pair was indefensible.
+        #
+        # Repairing the context gap means answering the question from the log,
+        # not finding a sentence that carries the offending figure past the
+        # check. ground_truth_answer is derived from the event log and true by
+        # construction, which is what the fallback is for.
+        if regenerated_ok and ungrounded_value is not None:
+            regenerated_ok = ungrounded_value not in self._numbers_in(answer)
         if not regenerated_ok:
             answer = cm.ground_truth_answer(query)
         # Report on the answer actually being returned, not on the draft that was

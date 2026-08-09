@@ -121,18 +121,28 @@ async def health_check():
     # Imported here, not at module scope: it pulls pymilvus and
     # sentence-transformers, which would land on `import main` and slow every
     # test that only touches an endpoint.
-    from phase2_ingestion_pipeline import PII_ENGINE
+    from phase2_ingestion_pipeline import PROVENANCE_PATH
+    # Which engine redacted the vectors being SERVED, read from what the ingest
+    # recorded. Reporting this process's own PII_ENGINE was wrong in a way that
+    # always understated the system: DPK pins transformers to 4.57.6 through
+    # flair, so it deliberately lives in .venv-dpk and the server can never
+    # import it - /health said "regex-fallback" no matter what built the store.
+    try:
+        provenance = json.loads(PROVENANCE_PATH.read_text())
+    except (OSError, ValueError):
+        provenance = {}
     return {
         "status": "NOMINAL" if _state["runner"] else "DEGRADED_NO_MODEL",
         "model": os.getenv("OLLAMA_MODEL", "granite3.3:8b"),
         "backend": "ollama",
         "model_loaded": _state["runner"] is not None,
         "retriever_loaded": _state["retriever"] is not None,
-        # Which redaction engine this process actually loaded. The UI used to
-        # assert "Data Prep Kit" unconditionally; DPK/Presidio only runs in the
-        # venv that has it installed, and claiming it otherwise is the kind of
-        # unverifiable statement this project exists to catch.
-        "pii_engine": PII_ENGINE,
+        # The UI used to assert "Data Prep Kit" unconditionally. An unverifiable
+        # claim in the trust panel of a hallucination firewall is the one place
+        # it cannot sit, so this names the engine or says it does not know.
+        "pii_engine": provenance.get("pii_engine", "unknown-not-ingested"),
+        "vector_store": "milvus-lite" if getattr(
+            _state["retriever"], "has_milvus", False) else "in-memory-fallback",
         "warmup_ms": _state["load_ms"],
         "circuit_breaker_tau": TAU,
         "event_log_cases": prof["total_cases"],

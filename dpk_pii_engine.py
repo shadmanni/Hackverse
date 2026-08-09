@@ -64,9 +64,10 @@ DPK_ENTITIES: List[str] = [
     "CREDIT_CARD",
 ]
 
-# Flair NER is DPK's preferred model (flair/ner-english-large) but requires a
-# separate heavy install.  We use spaCy en_core_web_sm for the venv here: same
-# Presidio API, lighter weight, still catches PERSON reliably.
+# Flair NER (flair/ner-english-large) is what DPK's own PIIAnalyzerEngine adds to
+# the registry, after REMOVING the default SpacyRecognizer. When the real package
+# is installed we get exactly that. Where it is not, spaCy en_core_web_sm carries
+# the same Presidio API at a fraction of the weight - see _analyzer_backend.
 SPACY_MODEL = "en_core_web_sm"
 
 # DPK's default_score_threshold_key = 0.6 — we keep it identical.
@@ -80,31 +81,69 @@ PII_SALT = os.getenv("SENTINEL_PII_SALT", "sentinel-demo-salt")
 # ---------------------------------------------------------------------------
 
 @lru_cache(maxsize=1)
-def _build_presidio_analyzer() -> AnalyzerEngine:
+def _analyzer_backend():
     """
-    Instantiate the Presidio AnalyzerEngine the same way DPK's
-    PIIAnalyzerEngine does in dpk_pii_redactor/pii_analyzer.py,
-    but without the Flair dependency so it runs in the project venv.
+    Return (analyze, anonymize, backend_name).
+
+    Prefers the REAL transform. `dpk_pii_redactor.pii_analyzer.PIIAnalyzerEngine`
+    is the engine `PIIRedactorTransform` constructs, so taking it directly means
+    the redaction running here is DPK's, not a reimplementation of it - the same
+    registry, the same Flair recognizer, the same score threshold. What we do not
+    take is the transform's pyarrow file-pipeline wrapper, which reads a parquet
+    column and writes another; this ingestion has events in memory and needs the
+    RecognizerResult list anyway, to drop the spans _exclude_protected protects.
+
+    The fallback builds Presidio the way DPK builds it, minus Flair. It exists
+    because the real package pins transformers to 4.57.6 (via flair) and pulls
+    ~1.5 GB of ner-english-large, which is why DPK lives in .venv-dpk and the
+    serving venv never imports this module. Both paths are exercised by the
+    tests; PII_ENGINE reports which one ran, and so does /health.
     """
-    import spacy
-    if not spacy.util.is_package(SPACY_MODEL):
-        logger.info("Downloading spaCy model %s …", SPACY_MODEL)
-        spacy.cli.download(SPACY_MODEL)
+    try:
+        from dpk_pii_redactor.pii_analyzer import PIIAnalyzerEngine
+        from dpk_pii_redactor.pii_anonymizer import PIIAnonymizer
+    except ImportError:
+        import spacy
+        if not spacy.util.is_package(SPACY_MODEL):
+            logger.info("Downloading spaCy model %s …", SPACY_MODEL)
+            spacy.cli.download(SPACY_MODEL)
 
-    registry = RecognizerRegistry()
-    registry.load_predefined_recognizers()
+        registry = RecognizerRegistry()
+        registry.load_predefined_recognizers()
+        nlp_cfg = {
+            "nlp_engine_name": "spacy",
+            "models": [{"lang_code": "en", "model_name": SPACY_MODEL}],
+        }
+        nlp_engine = NlpEngineProvider(nlp_configuration=nlp_cfg).create_engine()
+        analyzer = AnalyzerEngine(nlp_engine=nlp_engine, registry=registry)
+        anonymizer = AnonymizerEngine()
+        return (
+            lambda text: analyzer.analyze(
+                text=text, language="en",
+                entities=DPK_ENTITIES, score_threshold=DPK_SCORE_THRESHOLD,
+            ),
+            lambda text, results: anonymizer.anonymize(
+                text, results, operators={"DEFAULT": OperatorConfig("replace", None)}
+            ).text,
+            "dpk-presidio",
+        )
 
-    nlp_cfg = {
-        "nlp_engine_name": "spacy",
-        "models": [{"lang_code": "en", "model_name": SPACY_MODEL}],
-    }
-    nlp_engine = NlpEngineProvider(nlp_configuration=nlp_cfg).create_engine()
-    return AnalyzerEngine(nlp_engine=nlp_engine, registry=registry)
+    engine = PIIAnalyzerEngine(
+        supported_entities=DPK_ENTITIES, score_threshold=DPK_SCORE_THRESHOLD
+    )
+    anonymizer = PIIAnonymizer(operator="replace")
+    # analyze_text returns (results, entity_types); the types are recomputed
+    # downstream after protected spans are dropped, so only results are kept.
+    return (
+        lambda text: engine.analyze_text(text)[0],
+        lambda text, results: anonymizer.anonymize_text(text, results).text,
+        "dpk-pii-redactor",
+    )
 
 
-@lru_cache(maxsize=1)
-def _build_presidio_anonymizer() -> AnonymizerEngine:
-    return AnonymizerEngine()
+def backend_name() -> str:
+    """Which redaction engine this process will actually run."""
+    return _analyzer_backend()[2]
 
 
 # ---------------------------------------------------------------------------
@@ -226,24 +265,16 @@ def redact_pii(
         alias = pseudonymise(actor)
         working = re.sub(rf"\b{re.escape(actor)}\b", alias, working)
 
-    # Pass 2: Presidio NER sweep on the already-pseudonymised text.
+    # Pass 2: DPK's NER sweep on the already-pseudonymised text.
     # Filter out any result spanning an ACTOR alias so pseudonymisation survives.
-    analyzer = _build_presidio_analyzer()
-    anonymizer = _build_presidio_anonymizer()
+    analyze, anonymize, _backend = _analyzer_backend()
 
-    raw_results: List[RecognizerResult] = analyzer.analyze(
-        text=working,
-        language="en",
-        entities=DPK_ENTITIES,
-        score_threshold=DPK_SCORE_THRESHOLD,
-    )
+    raw_results: List[RecognizerResult] = analyze(working)
     results = _exclude_protected(working, raw_results, protected_terms)
     detected: List[str] = sorted({r.entity_type for r in results})
 
     if results:
-        op_cfg = {"DEFAULT": OperatorConfig("replace", None)}
-        anonymized = anonymizer.anonymize(working, results, operators=op_cfg)
-        working = anonymized.text
+        working = anonymize(working, results)
 
     # Pass 3: regex backstop for phone numbers that Presidio's NER missed.
     # spaCy en_core_web_sm scores Indian +CC format below the 0.6 threshold;
@@ -265,14 +296,8 @@ def analyze_entities(text: str) -> List[str]:
     reported entity list matches what redact_pii() would actually redact.
     Used by tests and the integrity-check layer.
     """
-    analyzer = _build_presidio_analyzer()
-    results = analyzer.analyze(
-        text=text,
-        language="en",
-        entities=DPK_ENTITIES,
-        score_threshold=DPK_SCORE_THRESHOLD,
-    )
-    detected = {r.entity_type for r in results}
+    analyze, _anonymize, _backend = _analyzer_backend()
+    detected = {r.entity_type for r in analyze(text)}
     # Include phone numbers caught by the regex backstop.
     if _PHONE_RE.search(text):
         detected.add("PHONE_NUMBER")

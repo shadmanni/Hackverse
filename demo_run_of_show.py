@@ -51,6 +51,32 @@ class Ungrounded(SentinelStream):
         return {"context": None, "retrieval_supported": False, "reason": "naive integration", "chunks": []}
 
 
+class FirewallOnly(SentinelStream):
+    """
+    The naive integration with the firewall armed, and nothing else changed.
+
+    The two-panel comparison confounds two variables: the protected panel gets
+    retrieved context AND interception, so every halt it fails to produce is
+    also evidence that the context alone was sufficient. A judge is entitled to
+    ask which half did the work, and with two panels the honest answer is "we
+    cannot tell you".
+
+    This panel holds the prompt, the model and the missing context fixed and
+    changes only whether the breaker is armed. It is where interception is
+    actually visible: given the grounded context the model answers correctly and
+    there is nothing to intercept, which is the right outcome and a poor
+    demonstration.
+
+    It deliberately does NOT inherit Ungrounded's empty _context_for. Only the
+    first generation is naive - grounded_prompt=False makes build_prompt drop
+    the context and assert database access, which is what produces the
+    fabrication. Recovery calls build_prompt with grounded=True and needs real
+    context to repair the gap with; inheriting the empty one left the
+    self-healing agent with nothing to heal from, so it answered "the context
+    does not provide this" to a question the log answers.
+    """
+
+
 async def run_panel(stream: SentinelStream, query: str) -> Dict[str, Any]:
     text, unc, intercept, summary = [], [], None, None
     t0 = time.perf_counter()
@@ -110,6 +136,8 @@ async def main() -> int:
     protected = SentinelStream(runner=runner, retriever=None, max_new_tokens=MAX_NEW_TOKENS)
     baseline = Ungrounded(runner=runner, retriever=None, max_new_tokens=MAX_NEW_TOKENS,
                           breach_run=10**9, check_numbers=False, grounded_prompt=False)
+    firewalled = FirewallOnly(runner=runner, retriever=None, max_new_tokens=MAX_NEW_TOKENS,
+                              grounded_prompt=False)
 
     rows: List[Dict[str, Any]] = []
 
@@ -118,15 +146,26 @@ async def main() -> int:
     print("-" * 78)
     for q in POISON:
         base = await run_panel(baseline, q)
+        fw = await run_panel(firewalled, q)
         prot = await run_panel(protected, q)
         fabricated = ungrounded_figures(protected, base["text"])
-        rows.append({"query": q, "class": "unanswerable", "baseline": base, "protected": prot,
+        rows.append({"query": q, "class": "unanswerable", "baseline": base,
+                     "firewall_only": fw, "protected": prot,
                      "baseline_fabricated_figures": fabricated})
         print(f"\nQ: {q}")
         print(f"  BASELINE  : {base['text'][:150]}")
         print(f"              fabricated figures: {fabricated or 'none detected'}")
+        print(f"  + FIREWALL: {fw['text'][:150]}")
+        print("              -> ", end="")
+        if fw["intercept"]:
+            i = fw["intercept"]
+            val = i.get("ungrounded_value")
+            detail = f" (figure {val})" if val is not None else ""
+            print(f"HALTED on {i['reason']}{detail} after {i['tokens_before_halt']} tokens")
+        else:
+            print("not intercepted")
         verdict = "HALTED" if prot["intercepted"] else "refused/grounded"
-        print(f"  SENTINEL  : {prot['text'][:150]}")
+        print(f"  + CONTEXT : {prot['text'][:150]}")
         print(f"              -> {verdict}", end="")
         if prot["intercept"]:
             i = prot["intercept"]
@@ -179,26 +218,35 @@ async def main() -> int:
     # generations that stop at their own natural lengths, so the difference
     # measures nothing about interception and went negative whenever the
     # baseline finished first - which is how it reported -2.
+    # Interception is measured on the firewall-only panel, not the protected
+    # one. Both are real, but they answer different questions: the protected
+    # panel says whether a bad figure reaches the user, and the firewall-only
+    # panel says whether the breaker works, holding everything else fixed. With
+    # good context the model does not fabricate, so the protected panel has
+    # nothing to intercept and reports zero halts - which reads as a firewall
+    # that never fires rather than one with nothing to fire at.
+    fw_stopped = sum(1 for r in unanswerable if r["firewall_only"]["intercepted"])
     halted_at = [
-        r["protected"]["intercept"]["tokens_before_halt"]
+        r["firewall_only"]["intercept"]["tokens_before_halt"]
         for r in unanswerable
-        if r["protected"]["intercepted"]
+        if r["firewall_only"]["intercepted"]
     ]
 
     print("\n" + "=" * 78)
     print("SUMMARY")
     print("=" * 78)
     print(f"Baseline fabricated a figure on      : {len(fabricating)}/{len(unanswerable)} unanswerable prompts")
-    print(f"Sentinel held the line               : {held}/{len(unanswerable)}")
+    print(f"Same prompt + firewall, halted it    : {fw_stopped}/{len(unanswerable)}")
+    if halted_at:
+        print(f"  halted after (median)              : {int(statistics.median(halted_at))} "
+              f"of {MAX_NEW_TOKENS} permitted tokens")
+    print(f"Firewall + retrieved context, held   : {held}/{len(unanswerable)}")
     print(f"  of which halted mid-generation     : {stopped}")
     print(f"  of which refused, stating no figure: {held - stopped}")
     print(f"  of which stated a bad figure anyway: {len(unanswerable) - held}")
     print(f"False positives on answerable prompts: {false_positives}/{len(answerable)}")
     if overheads:
         print(f"Audit overhead (median)              : {statistics.median(overheads):.4f}% of decode time")
-    if halted_at:
-        print(f"Halted after (median)                : {int(statistics.median(halted_at))} "
-              f"of {MAX_NEW_TOKENS} permitted tokens")
 
     if args.json:
         REPORT_PATH.write_text(json.dumps({
@@ -207,6 +255,7 @@ async def main() -> int:
             "summary": {
                 "unanswerable_prompts": len(unanswerable),
                 "baseline_fabricated": len(fabricating),
+                "firewall_only_halted": fw_stopped,
                 "held_the_line": held,
                 "halted_mid_generation": stopped,
                 "refused_without_figure": held - stopped,

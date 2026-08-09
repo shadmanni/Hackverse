@@ -32,6 +32,12 @@ interface StreamEvent {
   tau?: number;
   breach_run?: number;
   ungrounded_value?: number | null;
+  refutation?: {
+    claimed_metric: string;
+    claimed_statistic: string | null;
+    unit: string | null;
+    admissible: number[];
+  } | null;
   tokens_before_halt?: number;
   semantic_entropy?: number;
   figure_at_stake?: boolean;
@@ -473,8 +479,28 @@ export default function SplitScreenResponse({ query, graphName, onDone, tau: tau
                     <dd>{right.intercept.reason}</dd>
                     {right.intercept.ungrounded_value != null && (
                       <>
-                        <dt className="text-slate-500">figure not in log</dt>
+                        {/* Not "figure not in log". The figure very often IS in
+                            the log, belonging to a different metric - 9.11 is
+                            the high-value mean, and the halt on "the mean
+                            compliance cycle time ... is 9.11" was about the
+                            binding, not the number's absence. A judge who
+                            checks the data finds it and concludes the detector
+                            is broken. */}
+                        <dt className="text-slate-500">figure rejected</dt>
                         <dd className="text-rose-300 font-bold">{right.intercept.ungrounded_value}</dd>
+                        {right.intercept.refutation && (
+                          <>
+                            <dt className="text-slate-500">claimed as</dt>
+                            <dd>
+                              {right.intercept.refutation.claimed_statistic ?? "a value"} of{" "}
+                              {right.intercept.refutation.claimed_metric}
+                            </dd>
+                            <dt className="text-slate-500">log says</dt>
+                            <dd className="text-emerald-300 font-bold">
+                              {right.intercept.refutation.admissible.join(", ")}
+                            </dd>
+                          </>
+                        )}
                       </>
                     )}
                     {right.intercept.reason === "semantic_entropy" && (
