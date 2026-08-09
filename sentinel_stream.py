@@ -42,13 +42,20 @@ from entropy_engine import EntropyEngine
 # correctly refusing to answer: Granite said "...for warehouse node W-99" and
 # the "99" was scored as a fabricated number.
 _NUM_RE = re.compile(
-    r"(?<![A-Za-z0-9_.\-])"      # not preceded by identifier characters
+    # ':' is excluded on both sides so a clock time is not read as a claim:
+    # "created on 2026-06-04T16:47:00Z" yielded 47, which no metric can produce,
+    # and halted a sentence that only quoted a timestamp out of a chunk.
+    r"(?<![A-Za-z0-9_.\-:])"     # not preceded by identifier characters
     # The digit/separator run must END on a digit. As [\d,]* it swallowed a
     # trailing sentence comma - "above $100,000, the mean..." matched
     # "$100,000," - and the parsed value was then checked as though the claim
     # were about the comma's clause. Harmless-looking, but it was reporting the
     # log's own threshold as a contradiction.
     r"-?\$?\d(?:[\d,]*\d)?(?:\.\d+)?%?"
+    # ':' is excluded on the LEFT only. Excluding it on the right broke
+    # "Orders above $100,000:" in the aggregate block - the match backtracked to
+    # "$100" and reported 100 as ungrounded. A colon BEFORE a number is a clock;
+    # a colon after one is punctuation.
     r"(?![A-Za-z0-9_\-])"        # not followed by identifier characters
 )
 
@@ -91,9 +98,14 @@ _SENTENCE_BREAK = re.compile(r"(?<!\d)[.](?!\d)|[;:()\[\]\n]")
 # these appear in the system's OWN deterministic recovery answers. The "of"
 # branch requires a preceding figure so the far more common "a mean cycle time
 # of 10.43" still binds normally.
+#
+# \b is load-bearing: without it "over" matched inside "cover", so
+# "Bottleneck flags cover 25.33% of cases" lost its metric binding entirely and
+# the percentage rule below then rejected it as underivable.
 _QUALIFIER_BEFORE = re.compile(
-    r"(?:\d[\d,.]*\s+of"
-    r"|above|below|over|under|exceeding|more than|less than|at least|at most)"
+    r"\b(?:\d[\d,.]*\s+of"
+    r"|above|below|over|under|exceeding|in excess of"
+    r"|more than|less than|at least|at most)"
     r"\s+\$?$",
     re.IGNORECASE,
 )
@@ -267,8 +279,16 @@ class SentinelStream:
         """
         prev = list(_NUM_RE.finditer(text[:start]))
         left = prev[-1].end() if prev else 0
+        # Forward reach applies ONLY when this figure is the last in its clause.
+        # A statistic word standing between two figures belongs to the one it
+        # precedes, not the one it follows: in
+        #   "Across 122 Compliance Review events the average was 10.43 days"
+        # "average" describes 10.43, but reaching forward from 122 swallowed it
+        # and checked a COUNT against Compliance Review's mean. The case the
+        # forward reach exists for - "16 days on average" - has no later figure,
+        # so it is unaffected.
         nxt = _NUM_RE.search(text[end:])
-        right = end + (nxt.start() if nxt else len(text) - end)
+        right = end if nxt else len(text)
 
         # Then clipped to the figure's own CLAUSE. Bounding only by neighbouring
         # figures let a statistic word leak across a clause boundary: in
@@ -373,7 +393,7 @@ class SentinelStream:
 
     def _ungrounded_number(
         self, span: str, scope: str = "all", metric: Optional[str] = None,
-        statistic: Optional[str] = None,
+        statistic: Optional[str] = None, metrics: Optional[List[str]] = None,
     ) -> Optional[float]:
         """First number in `span` that the event log cannot produce."""
         # A percentage that names no metric we know cannot be grounded at all.
@@ -383,12 +403,20 @@ class SentinelStream:
         # declared order-to-cash figure - a discount validated against a count
         # of days. There is no discount data in the log; the honest answer is
         # that the claim is ungrounded whatever its value.
-        if "%" in span and metric is None:
+        options = list(metrics) if metrics else [metric]
+        if "%" in span and not any(options):
             vals = self._numbers_in(span)
             if vals:
                 return vals[0]
+        # A sentence may name more than one metric, and then no single binding is
+        # correct. Accept the figure if ANY metric it names admits it; a figure
+        # that fits none still fails, so no detection is lost. See
+        # cm.bound_metrics for why neither longest-wins nor nearest-wins works.
         for val in self._numbers_in(span):
-            if not cm.is_grounded_number(val, scope=scope, metric=metric, statistic=statistic):
+            if not any(
+                cm.is_grounded_number(val, scope=scope, metric=m, statistic=statistic)
+                for m in options
+            ):
                 return val
         return None
 
@@ -420,8 +448,8 @@ class SentinelStream:
                 # metric's values, not merely some value in the log - unless the
                 # figure is a threshold or a denominator, which qualify the
                 # metric rather than state it.
-                metric=None if _QUALIFIER_BEFORE.search(text[:m.start()])
-                else cm.bound_metric(self._metric_span(prefix, tail)),
+                metrics=[] if _QUALIFIER_BEFORE.search(text[:m.start()])
+                else cm.bound_metrics(self._metric_span(prefix, tail)),
                 # And if it names the statistic too, it must be that statistic's
                 # value - "16 days on average" quotes Compliance Review's max.
                 statistic=cm.bound_statistic(self._statistic_span(text, m.start(), m.end())),
@@ -459,14 +487,14 @@ class SentinelStream:
         for m in _NUM_RE.finditer(text):
             figure = m.group()
             prefix = text[:m.end()]
-            metric = (
-                None if _QUALIFIER_BEFORE.search(text[:m.start()])
-                else cm.bound_metric(self._metric_span(prefix, text[m.end():]))
-            )
+            metrics = ([] if _QUALIFIER_BEFORE.search(text[:m.start()])
+                       else cm.bound_metrics(self._metric_span(prefix, text[m.end():])))
+            # Head of the list for reporting; the whole list decides the verdict.
+            metric = metrics[0] if metrics else None
             statistic = cm.bound_statistic(self._statistic_span(text, m.start(), m.end()))
             scope = self._claim_scope(prefix, figure=figure)
             contradicted = self._ungrounded_number(
-                figure, scope=scope, metric=metric, statistic=statistic
+                figure, scope=scope, metrics=metrics, statistic=statistic
             ) is not None
             if contradicted:
                 state = "contradicted"
@@ -514,6 +542,17 @@ class SentinelStream:
                 "candidates": sd.fan(dstep.top_tokens, dstep.top_probs) if dstep else None,
                 "candidates_token_index": dstep.index if dstep else None,
                 "semantic_entropy": round(div.semantic_entropy, 4) if div else None,
+                # Carried on the intercept too, so a surface reading this field
+                # gets the same answer whatever event it is looking at. It was
+                # only on token events, so anything reading it off an intercept
+                # silently got None and rendered "no figure at stake" at the
+                # exact moment a figure was the entire problem.
+                #
+                # Taken from the DECISION step, not the halting one: like
+                # semantic_entropy above, it describes where the value was
+                # chosen, which is a different token from where the breaker
+                # tripped.
+                "figure_at_stake": div.divergent if div else None,
                 "divergence_explained": div.explain() if div else None,
                 # The trailing-figure path has no step object; the offending
                 # figure is the last thing emitted, so report that position
@@ -608,7 +647,8 @@ class SentinelStream:
         overhead_s = 0.0
         emitted = 0
         consecutive = 0         # length of the current run of threshold breaches
-        decision = None         # (step, divergence) where a figure was last at stake
+        decision = None         # (step, divergence) where a figure was most at stake
+        decision_mass = 0.0     # numeric mass at that step; see the update below
 
         async for step in self.runner.stream(prompt, max_new_tokens=self.max_new_tokens):
             tok = step.text
@@ -628,11 +668,20 @@ class SentinelStream:
             # scores the question the raw number cannot: is a FIGURE at stake.
             # Costs no extra forward pass; the distribution already exists.
             divergence = sd.analyse(step.top_tokens, step.top_probs)
-            # Remember where a figure was last on the table. The trip almost
+            # Remember where a figure was MOST on the table. The trip almost
             # never lands on that token - see _trip's `decision` parameter - so
-            # the evidence has to be captured when it passes by.
-            if divergence.numeric_options:
-                decision = (step, divergence)
+            # the evidence has to be captured as it passes by.
+            #
+            # Strongest, not latest. Keeping the latest token with any numeric
+            # candidate at all meant a trace digit in an otherwise prose
+            # distribution overwrote the real thing: one live intercept reported
+            # its decision as "2 distinct figures on the table but only 0% of
+            # the mass - the model is mostly writing prose here", and that is
+            # what the terminal would have shown a judge as the moment the
+            # figure was chosen. Ranking by numeric mass lands on the token
+            # where the model was actually committing to a value.
+            if divergence.numeric_mass > decision_mass:
+                decision, decision_mass = (step, divergence), divergence.numeric_mass
 
             # Scan the assembled text rather than buffering characters, so a
             # figure split across tokens ("10" "." "43") is checked as one value

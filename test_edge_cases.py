@@ -172,14 +172,21 @@ def _figures(text: str) -> List[float]:
 
 
 def ungrounded_in(text: str) -> List[float]:
-    out = []
-    for m in _NUM_RE.finditer(text):
-        scope = SentinelStream._claim_scope(text[: m.end()], figure=m.group())
-        metric = cm.bound_metric(text[: m.end()])
-        for v in SentinelStream._numbers_in(m.group()):
-            if not cm.is_grounded_number(v, scope=scope, metric=metric):
-                out.append(v)
-    return out
+    """
+    Figures the product itself would refuse, via the product's own path.
+
+    This used to re-implement metric binding here (bound_metric over a bare
+    prefix). That duplicate drifted the moment the real span logic changed, and
+    started reporting 9.11 and 100000 as ungrounded in a sentence the live
+    stream passes clean - the harness failing, not the product.
+
+    Circularity is handled by the `forbid` lists instead: those name figures
+    ground truth contradicts outright and are checked literally, so a case can
+    still fail even when the product agrees with itself.
+    """
+    probe = SentinelStream(runner=None, retriever=None)
+    offending, _ = probe._scan_new_figures(text, 0, complete_only=False)
+    return [offending] if offending is not None else []
 
 
 async def run_case(client: httpx.AsyncClient, case: Dict[str, Any]) -> Dict[str, Any]:

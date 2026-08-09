@@ -276,6 +276,39 @@ def metric_aliases(path: str = str(DATA_PATH)) -> Dict[str, frozenset]:
     }
 
 
+@lru_cache(maxsize=8)
+def _log_wide(path: str = str(DATA_PATH), statistic: Optional[str] = None) -> frozenset:
+    """
+    Facts about the LOG rather than about any metric: how many cases it holds,
+    how many events, and the span its cycle times cover.
+
+    These are admissible whatever metric a sentence happens to name, and binding
+    made them inadmissible. "150 cases are in the order-to-cash process" halted
+    on 150 - the true case count - because "order-to-cash" narrowed the set to
+    that metric's single declared value of 12.0. Measured live: it is what
+    Granite answers to "How many cases are in the order-to-cash process?", which
+    is a question a judge asks in the first minute, and the halt landed on a
+    correct answer.
+
+    The same shape covers ranges ("cycle times range between 1 and 23 days") -
+    the minimum is a real property of the log that no metric's value set holds.
+
+    Withheld when the sentence claims a mean, median or max, because there the
+    figure IS being asserted as that statistic of that metric and the narrow set
+    is the whole point: "the mean compliance cycle time is 150 days" must still
+    fail. Counts and unqualified statements get the exemption; statistics do not.
+    """
+    if statistic in {"mean", "median", "max", "rate"}:
+        return frozenset()
+    p = process_profile(path)
+    cycles = [e["cycle_time_days"] for e in load_events(path)
+              if e.get("cycle_time_days") is not None]
+    vals = {p["total_cases"], p["total_events"], p["high_value_events"]}
+    if cycles:
+        vals |= {min(cycles), max(cycles)}
+    return frozenset(round(float(v), 2) for v in vals if v is not None)
+
+
 def bound_metric(text: str, window: int = 200) -> Optional[str]:
     """
     The metric phrase a claim names, if any. Longest match wins; on a tie, the
@@ -310,6 +343,40 @@ def bound_metric(text: str, window: int = 200) -> Optional[str]:
     # actually means.
     specific = [h for h in hits if h[2] not in _GENERIC_ALIASES]
     return max(specific or hits)[2]
+
+
+def bound_metrics(text: str, window: int = 200) -> list:
+    """
+    EVERY metric phrase the claim names, best-first (same ordering as
+    bound_metric, whose answer is this list's head).
+
+    One sentence can name two metrics, and then no single binding is correct:
+
+        "Compliance Review averages 10.43 days, while the bottleneck step
+         averages 12.47 days."
+
+    Binding both figures to the winner rejects 12.47 - the bottleneck mean,
+    true - for not being a Compliance Review value. Picking the nearest metric
+    instead breaks the opposite case ("...occurs 122 times with a mean cycle
+    time of 10.43", where the nearest phrase is the generic "cycle time" and the
+    correct binding is the activity named earlier). Neither rule is right,
+    because the ambiguity is real.
+
+    So the caller checks the figure against every metric the sentence names and
+    accepts it if ANY of them admits it. A figure that fits none still fails -
+    12.5 is not a value of any metric in "the mean compliance cycle time is
+    12.5 days" - so this loses no detection. It only declines to halt on an
+    ambiguity the sentence genuinely contains.
+    """
+    recent = text[-window:].lower()
+    hits = [(len(k), recent.rfind(k), k) for k in metric_aliases() if k in recent]
+    if not hits:
+        return []
+    specific = [h for h in hits if h[2] not in _GENERIC_ALIASES]
+    # Specific phrases first, each ordered as bound_metric would rank them.
+    return [h[2] for h in sorted(specific, reverse=True)] + [
+        h[2] for h in sorted((h for h in hits if h[2] in _GENERIC_ALIASES), reverse=True)
+    ]
 
 
 def is_grounded_number(
@@ -351,7 +418,7 @@ def is_grounded_number(
     if by_stat and statistic and statistic in by_stat:
         candidates = by_stat[statistic]
     elif metric and metric in metric_aliases(path):
-        candidates = metric_aliases(path)[metric]
+        candidates = metric_aliases(path)[metric] | _log_wide(path, statistic)
     else:
         candidates = groundable_numbers(path, scope)
     for known in candidates:

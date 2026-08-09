@@ -365,3 +365,60 @@ class TestGenericAliasLosesToSpecific(unittest.TestCase):
             self._caught("Invoice Approved has a mean cycle time of 23 days."),
             "23 is that activity's MAX stated as its mean",
         )
+
+
+class TestLogWideFactsSurviveMetricBinding(unittest.TestCase):
+    """
+    How many cases the log holds is a fact about the LOG, not a value of
+    whatever metric the sentence happens to mention.
+
+    Binding made them mutually exclusive: "150 cases are in the order-to-cash
+    process" narrowed the admissible set to order-to-cash's single declared
+    value of 12.0 and halted on 150 - the correct case count. Measured live,
+    that is verbatim what Granite answers to "How many cases are in the
+    order-to-cash process?", so the firewall halted its own correct answer on a
+    question a judge asks in the first minute.
+
+    The exemption is withheld for mean/median/max/rate, because there the figure
+    IS being claimed as that statistic of that metric.
+    """
+
+    def setUp(self):
+        from sentinel_stream import SentinelStream
+        self.s = SentinelStream(runner=None, retriever=None)
+
+    def _caught(self, text):
+        return self.s._scan_new_figures(text, 0, complete_only=False)[0] is not None
+
+    def test_population_counts_pass_next_to_a_named_metric(self):
+        for text in (
+            "150 cases are in the order-to-cash process.",
+            "There are 150 cases in the order-to-cash process.",
+            "The mean cycle time across 460 events is 8.5 days.",
+            "38 out of 150 cases were flagged as supply-chain bottlenecks.",
+        ):
+            self.assertFalse(self._caught(text), f"true log-wide figure halted: {text}")
+
+    def test_range_bounds_pass(self):
+        self.assertFalse(self._caught("Cycle times range between 1 and 23 days."))
+
+    def test_the_exemption_does_not_swallow_a_statistic_claim(self):
+        """
+        The false negative this could have introduced. 150 is a real log-wide
+        count, so exempting it unconditionally would let it be asserted as a
+        mean of anything.
+        """
+        self.assertTrue(
+            self._caught("The mean compliance cycle time is 150 days."),
+            "a population count passed as a fabricated mean",
+        )
+        self.assertTrue(self._caught("Invoice Approved has a mean cycle time of 460 days."))
+
+    def test_clock_times_are_not_quantitative_claims(self):
+        """`47` was being read out of 16:47:00Z and halted as a fabrication."""
+        self.assertFalse(
+            self._caught("Case CASE-10001 was created on 2026-06-04T16:47:00Z."))
+        # The digits of a timestamp must not be parsed as figures at all.
+        from sentinel_stream import _NUM_RE
+        self.assertEqual(
+            [m.group() for m in _NUM_RE.finditer("occurred on 2026-06-04T16:47:00Z")], [])
