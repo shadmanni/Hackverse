@@ -180,7 +180,10 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
                 if response.status_code == 200:
                     use_ollama_stream = True
                     token_counter = 0
-                    punctuation_marks = {",", ".", ";", "\n"}
+                    active_eval_task = None
+                    breach_detected = False
+                    breach_payload = None
+
                     async for line in response.aiter_lines():
                         if line and line.startswith("data: ") and not line.endswith("[DONE]"):
                             try:
@@ -191,26 +194,40 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
                                     context_history.append(delta_content)
                                     token_counter += 1
                                     
-                                    # Boundary check for K-path sampling (at clause endings or every 10 tokens)
-                                    is_boundary = (token_counter % 10 == 0) or any(p in delta_content for p in {".", ";", "\n", "?"})
-                                    if is_boundary:
-                                        current_prefix = "".join(context_history)
-                                        paths = await semantic_entropy_engine.generate_k_paths(current_prefix, K=3, max_tokens=10)
-                                        raw_se = semantic_entropy_engine.cluster_and_compute_entropy(paths)
-                                        ema_score = firewall.update(raw_se)
+                                    # Check background evaluation task result if completed
+                                    if active_eval_task and active_eval_task.done():
+                                        try:
+                                            ema_score = active_eval_task.result()
+                                            if firewall.check_breach():
+                                                breach_detected = True
+                                                breach_payload = {
+                                                    "status": 406,
+                                                    "error": "hallucination_detected",
+                                                    "ema_score": round(ema_score, 4)
+                                                }
+                                        except Exception as task_err:
+                                            print(f"[Sentinel Firewall] Background task error: {task_err}")
+                                        active_eval_task = None
 
+                                    if breach_detected and breach_payload:
+                                        log_compliance_breach(query_str, breach_payload["ema_score"])
+                                        yield f"data: {json.dumps(breach_payload)}\n\n"
+                                        return
+
+                                    # Trigger non-blocking background task at clause boundaries (or every 15 tokens) if no task is currently running
+                                    is_boundary = (token_counter % 15 == 0) or any(p in delta_content for p in {".", ";", "\n", "?"})
+                                    if is_boundary and active_eval_task is None:
+                                        current_prefix = "".join(context_history)
                                         
-                                        if firewall.check_breach():
-                                            log_compliance_breach(query_str, ema_score)
-                                            interception_payload = {
-                                                "status": 406,
-                                                "error": "hallucination_detected",
-                                                "ema_score": round(ema_score, 4)
-                                            }
-                                            yield f"data: {json.dumps(interception_payload)}\n\n"
-                                            return
+                                        async def _background_eval(prefix_str: str):
+                                            paths = await semantic_entropy_engine.generate_k_paths(prefix_str, K=3, max_tokens=10)
+                                            raw_se = semantic_entropy_engine.cluster_and_compute_entropy(paths)
+                                            return firewall.update(raw_se)
+
+                                        active_eval_task = asyncio.create_task(_background_eval(current_prefix))
                             except Exception:
                                 pass
+
     except Exception as ollama_err:
         print(f"[Sentinel Stream] Ollama streaming fallback: {ollama_err}")
         use_ollama_stream = False
