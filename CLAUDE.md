@@ -2,8 +2,45 @@
 
 **Project Name:** Sentinel-RAG (Enterprise Trust Middleware for Process Intelligence)  
 **Track:** AI for Business Transformation[cite: 1, 2]  
-**Sponsor Integrations:** IBM Granite, IBM Data Prep Kit, Milvus Enterprise Vector Store, Celonis EMS[cite: 1, 2]  
+**Sponsor Integrations:** IBM Granite, Milvus (Lite), Celonis EMS[cite: 1, 2]  
 **Development Stack:** IBM Bob (Orchestration & Code Acceleration) + Custom Python Evaluation Pipeline  
+
+---
+
+## 0. IMPLEMENTATION STATUS (what is actually built — read this first)
+
+The roadmap in section 5 is the original plan. Where it disagrees with this
+section, this section wins.
+
+* **Generation:** `ibm-granite/granite-3.3-2b-instruct` running **locally via
+  transformers on Apple MPS** (`granite_runner.py`). Not the watsonx API, not
+  Granite-13b. Chosen so the demo has no network dependency on stage. Real
+  per-token log-probabilities and top-5 distributions come out of the decode
+  loop — the entropy engine is fed measured values, not constants.
+* **Frontend:** Next.js "Security Terminal" (`frontend/`). **Streamlit is gone**
+  — `streamlit_app.py` was deleted; two processes cannot hold the Milvus Lite
+  lock at once.
+* **Vector store:** Milvus **Lite**, embedded single-file at
+  `data/sentinel_milvus.db`, collection `celonis_ground_truth`, 461 vectors from
+  `data/mock_celonis_data_large.json`. Single-process: stop the backend before
+  running anything else that opens it.
+* **PII:** actors are pseudonymised to stable salted-hash aliases in
+  `phase2_ingestion_pipeline.py`. **IBM Data Prep Kit is NOT wired in** —
+  `dpk_ingest.py` stages it as an offline step in a separate venv, because DPK
+  downgrades transformers to 4.57.6 and would break the model. Do not claim DPK
+  is in the pipeline until that script has actually been run.
+* **Detection is two layers**, not one: semantic entropy over real logprobs
+  (requires a run of consecutive breaches, since a single flat token is usually
+  just sentence-opening or hedging), plus a deterministic numeric-grounding
+  check that refutes any figure the event log cannot produce.
+* **Ground truth:** every aggregate the system may state comes from
+  `celonis_metrics.py`. The declared mean compliance cycle time is **10.4 days**.
+  Any hardcoded "4.2 business days" / "99.4% SLA" is a fabrication — the event
+  log does not contain those figures.
+
+**Operational rules:** stop the backend before running `pytest` (two Granite
+instances on one MPS device segfault). Backend warm-up is ~35s at startup, paid
+once, not per query.
 
 ---
 
@@ -38,9 +75,9 @@ Sentinel-RAG introduces a complete paradigm shift: moving hallucination detectio
 
 Sentinel-RAG is a highly optimized architecture utilizing the best of the IBM ecosystem, orchestrated via **IBM Bob**.
 
-* **Layer 1: IBM Data Prep Kit (Ingestion & Privacy)** - Intercepts raw Celonis EMS event logs. We utilize PII data masking to discover, remove, or hide sensitive information from datasets, directly mitigating security and compliance risks while allowing the data to be securely utilized for analysis[cite: 3]. 
+* **Layer 1: Ingestion & Privacy** - Intercepts raw Celonis EMS event logs and pseudonymises direct identifiers before embedding, so no actor name reaches the vector store. Pseudonyms are stable per actor, which preserves handoff and segregation-of-duty analysis that blanket redaction would destroy. IBM Data Prep Kit is staged for this layer (`dpk_ingest.py`) but not yet run — see section 0.
 * **Layer 2: Milvus Lite Vector Database (Storage)** - The dense vector database storing ground-truth process metadata.
-* **Layer 3: IBM Granite (Generation)** - The primary generative engine (e.g., Granite-13b-chat), processing complex prompts containing retrieved Celonis process metrics[cite: 1, 2].
+* **Layer 3: IBM Granite (Generation)** - `granite-3.3-2b-instruct`, run locally on MPS, processing prompts containing retrieved Celonis process metrics[cite: 1, 2].
 * **Layer 4: Semantic Entropy Evaluator (The Core Logic)** - A specialized Python evaluation layer that actively calculates predictive variance and log-probabilities on the generated output in real-time.
 * **Layer 5: Autonomous Recovery (Self-Healing Agents)** - When the evaluator logs an entropy error, it triggers an autonomous agentic fallback to dynamically formulate a new vector search strategy and repair the context gap[cite: 1, 2].
 
@@ -68,12 +105,12 @@ The team is fully certified under the IBM SkillsBuild "Future Forward: AI for In
 * **Shivansh (Lead Evaluator):** Build the initial mock Python evaluation script. Create a local execution loop that streams a hardcoded sentence, simulates a spike in log-probability variance, actively logs an error flag, and physically halts the stream at a predefined token.
 * **Shadman (Data Pipeline):** Generate `mock_celonis_data.json` containing simulated supply chain metrics (e.g., order-to-cash cycle times). Draft a mock ingestion script to demonstrate the ETL pipeline plan to the judges.
 * **Riddhi (Entropy Analytics):** Whiteboard the Semantic Entropy mathematical framework. Outline the exact predictive variance formula and document how token log-probabilities will be extracted from IBM Granite's output.
-* **Shaurya (Visualizations):** Initialize the Streamlit frontend. Build the chat interface that connects to Shivansh's mock stream, programming it to catch the error flag, highlight the exact halted token in red, and display a simulated "Self-Healing Triggered" loader.
+* **Shaurya (Visualizations):** Initialize the frontend (originally Streamlit; now Next.js). Build the chat interface that connects to Shivansh's mock stream, programming it to catch the error flag, highlight the exact halted token in red, and display a simulated "Self-Healing Triggered" loader.
 
 ### PHASE 2: Core Pipeline, Vectorization & Integration
 * **Goal:** Establish the genuine data flow from raw synthetic event logs to the live IBM Granite model.
-* **Shivansh (Lead Evaluator):** Replace the mock script with a live connection to the IBM Granite API. Implement the stream-reading loop to extract actual token log-probabilities generated by the model in real-time.
-* **Shadman (Data Pipeline):** Implement the true IBM Data Prep Kit pipeline. Parse the synthetic Celonis logs, execute PII data masking to discover, remove, or hide sensitive information from the datasets, and embed the cleaned semantic chunks into the Milvus vector database[cite: 3].
+* **Shivansh (Lead Evaluator):** Replace the mock script with a real Granite decode loop (shipped as a LOCAL transformers/MPS runner, not the API) and extract actual token log-probabilities in real time.
+* **Shadman (Data Pipeline):** Implement the ingestion pipeline (DPK staged, not yet run — see section 0). Parse the synthetic Celonis logs, execute PII data masking to discover, remove, or hide sensitive information from the datasets, and embed the cleaned semantic chunks into the Milvus vector database[cite: 3].
 * **Riddhi (Entropy Analytics):** Write the core Python mathematical engine. Accept the streaming log-probabilities from Shivansh's pipeline and calculate the time-series variance ($V(y_t)$) continuously across the sequence.
 * **Shaurya (Visualizations):** Use IBM Bob to rapidly scaffold asynchronous frontend API polling logic. Integrate the UI with Shadman's vector database, allowing the user to select which specific process graphs they want to query.
 
@@ -89,7 +126,7 @@ The team is fully certified under the IBM SkillsBuild "Future Forward: AI for In
 * **Shivansh (Lead Evaluator):** Optimize the Python evaluation loop. Ensure the real-time entropy calculations and threshold checks add near-zero latency overhead to the active token stream.
 * **Shadman (Data Pipeline):** Finalize the demo run-of-show. Ensure a 100% success rate on the Poison Prompts triggering the firewall, while standard prompts execute smoothly against the Milvus data.
 * **Riddhi (Entropy Analytics):** Lock in the threshold calibration for a 0% false-positive rate. Export log-probability variance graphs to show the judges exactly how the math behaved under the hood during the demo.
-* **Shaurya (Visualizations):** Brand the Streamlit dashboard as a deployable, enterprise-grade SaaS "Security Terminal." Add a live data visualization module that charts the Semantic Entropy Variance spiking in real-time right before the stream halts.
+* **Shaurya (Visualizations):** Brand the Next.js dashboard as a deployable, enterprise-grade SaaS "Security Terminal." Add a live data visualization module that charts the Semantic Entropy Variance spiking in real-time right before the stream halts.
 
 ---
 
