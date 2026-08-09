@@ -15,7 +15,7 @@ import json
 import statistics
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, Optional, Set
 
 BASE_DIR = Path(__file__).parent.resolve()
 DATA_PATH = BASE_DIR / "data" / "mock_celonis_data_large.json"
@@ -121,11 +121,71 @@ def groundable_numbers(path: str = str(DATA_PATH), scope: str = "all") -> Set[fl
     return nums
 
 
+@lru_cache(maxsize=4)
+def metric_aliases(path: str = str(DATA_PATH)) -> Dict[str, frozenset]:
+    """
+    Phrase -> the values that phrase may legitimately take.
+
+    Checking a figure against the whole aggregate set is too weak, because the
+    aggregates are densely packed. Granite claimed "the mean compliance cycle
+    time is 12.5 days"; the real value is 10.4, but 12.5 is a valid rounding of
+    12.47 - the SUPPLY CHAIN BOTTLENECK mean - so a set-membership test accepted
+    it. Tolerance cannot separate those: 12.5 rounds from 12.47 exactly as
+    legitimately as 10.4 rounds from 10.43.
+
+    The claim has to be bound to the metric it names. When a sentence names one
+    of these phrases, only that metric's values are admissible.
+    """
+    p = process_profile(path)
+    act = p["by_activity"]
+    out: Dict[str, frozenset] = {}
+
+    def add(phrase: str, *vals):
+        clean = {round(float(v), 2) for v in vals if v is not None}
+        if clean:
+            out[phrase] = frozenset(clean)
+
+    add("compliance cycle time",
+        p["declared_avg_compliance_cycle_time_days"],
+        act.get("Compliance Review", {}).get("mean_cycle_days"))
+    add("compliance review",
+        act.get("Compliance Review", {}).get("mean_cycle_days"),
+        act.get("Compliance Review", {}).get("max_cycle_days"),
+        act.get("Compliance Review", {}).get("event_count"))
+    add("order-to-cash", p["declared_avg_order_to_cash_days"])
+    add("order to cash", p["declared_avg_order_to_cash_days"])
+    add("bottleneck",
+        act.get("Supply Chain Bottleneck Flagged", {}).get("mean_cycle_days"),
+        act.get("Supply Chain Bottleneck Flagged", {}).get("event_count"),
+        p["declared_orders_flagged_for_bottleneck"],
+        round(act.get("Supply Chain Bottleneck Flagged", {}).get("event_count", 0)
+              / max(p["total_cases"], 1) * 100, 2))
+    add("invoice approved",
+        act.get("Invoice Approved", {}).get("mean_cycle_days"),
+        act.get("Invoice Approved", {}).get("max_cycle_days"),
+        act.get("Invoice Approved", {}).get("event_count"))
+    add("purchase order",
+        act.get("Purchase Order Created", {}).get("mean_cycle_days"),
+        act.get("Purchase Order Created", {}).get("max_cycle_days"),
+        act.get("Purchase Order Created", {}).get("event_count"))
+    add("high-value", p["high_value_orders"], p["high_value_mean_cycle_days"])
+    add("high value", p["high_value_orders"], p["high_value_mean_cycle_days"])
+    return out
+
+
+def bound_metric(text: str, window: int = 200) -> Optional[str]:
+    """The metric phrase a claim names, if any. Longest match wins."""
+    recent = text[-window:].lower()
+    hits = [k for k in metric_aliases() if k in recent]
+    return max(hits, key=len) if hits else None
+
+
 def is_grounded_number(
     value: float,
     path: str = str(DATA_PATH),
     rel_tol: float = 0.02,
     scope: str = "all",
+    metric: Optional[str] = None,
 ) -> bool:
     """
     True when `value` matches a number the event log can produce, within 2%.
@@ -135,9 +195,19 @@ def is_grounded_number(
 
     Pass scope="aggregate" when the surrounding sentence is asserting a mean,
     total, rate or percentage. See groundable_numbers for why that matters.
+
+    Pass metric=<phrase from metric_aliases> when the sentence names a specific
+    metric. That narrows the admissible set to that metric's own values, which
+    is the only way to reject a figure that is real but belongs to a different
+    metric - see metric_aliases for the case that motivated it.
     """
     target = round(float(value), 2)
-    for known in groundable_numbers(path, scope):
+    candidates = (
+        metric_aliases(path).get(metric)
+        if metric and metric in metric_aliases(path)
+        else groundable_numbers(path, scope)
+    )
+    for known in candidates:
         if known == target:
             return True
         scale = max(abs(known), abs(target), 1e-9)

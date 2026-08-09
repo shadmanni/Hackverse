@@ -15,7 +15,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import main
-from test_stage2_granite_live import _weights_present
+from test_stage2_granite_live import _model_available
 
 BASE = "http://test"
 
@@ -88,8 +88,8 @@ async def test_recover_answers_only_with_grounded_figures():
 
 @pytest.fixture(scope="module")
 def loaded():
-    if not _weights_present():
-        pytest.skip("Granite weights not downloaded")
+    if not _model_available():
+        pytest.skip("Granite model not available via Ollama")
     if main._state["runner"] is None:
         main._load_models()
     return main._state

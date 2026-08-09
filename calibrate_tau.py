@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from entropy_engine import EntropyEngine
-from granite_runner import GraniteRunner
+from ollama_runner import OllamaRunner
 
 REPORT = Path(__file__).parent / "data" / "tau_calibration.json"
 
@@ -55,7 +55,7 @@ TAUS = [0.45, 0.55, 0.65, 0.75, 0.85, 1.00, 1.25]
 RUNS = [1, 2, 3, 4, 5]
 
 
-def collect(runner: GraniteRunner, query: str, grounded: bool, max_new_tokens: int = 90) -> List[float]:
+def collect(runner, query: str, grounded: bool, max_new_tokens: int = 90) -> List[float]:
     """Per-token weighted uncertainty for one generation, at a fixed tau.
 
     The uncertainty score does not depend on tau - tau is only the comparison -
@@ -92,7 +92,7 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=90)
     args = ap.parse_args()
 
-    runner = GraniteRunner.get()
+    runner = OllamaRunner()
 
     print("Collecting real log-probabilities…")
     # Answerable prompts run grounded, the way the product answers them.

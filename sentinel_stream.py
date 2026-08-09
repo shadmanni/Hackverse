@@ -186,10 +186,12 @@ class SentinelStream:
         recent = text[-window:].lower()
         return "aggregate" if any(w in recent for w in cls._AGG_WORDS) else "all"
 
-    def _ungrounded_number(self, span: str, scope: str = "all") -> Optional[float]:
+    def _ungrounded_number(
+        self, span: str, scope: str = "all", metric: Optional[str] = None
+    ) -> Optional[float]:
         """First number in `span` that the event log cannot produce."""
         for val in self._numbers_in(span):
-            if not cm.is_grounded_number(val, scope=scope):
+            if not cm.is_grounded_number(val, scope=scope, metric=metric):
                 return val
         return None
 
@@ -213,8 +215,13 @@ class SentinelStream:
             if complete_only and (not tail or set(tail) <= {".", ","}):
                 break                      # still being emitted; check it later
             scanned_to = m.end()
+            prefix = text[:m.end()]
             val = self._ungrounded_number(
-                m.group(), scope=self._claim_scope(text[:m.end()], figure=m.group())
+                m.group(),
+                scope=self._claim_scope(prefix, figure=m.group()),
+                # If the sentence names a metric, the figure must be one of THAT
+                # metric's values, not merely some value in the log.
+                metric=cm.bound_metric(prefix),
             )
             if val is not None:
                 return val, scanned_to
