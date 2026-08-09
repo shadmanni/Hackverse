@@ -447,8 +447,9 @@ if execute_btn and user_query:
     ])
 
     for i in range(max_steps):
-        time.sleep(0.08)
+        time.sleep(0.015)
         step_indices.append(f"T#{i+1}")
+
 
         # Update Left Stream (Unprotected)
         if i < len(unprotected_tokens):
