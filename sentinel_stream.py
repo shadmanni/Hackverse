@@ -174,6 +174,16 @@ class SentinelStream:
         "combined", "cumulative", "per case", "on average",
     )
 
+    @staticmethod
+    def _mid_figure(text: str) -> bool:
+        """True when the text ends inside a number still being emitted."""
+        tail = text.rstrip()
+        if not tail:
+            return False
+        # "12", "12." and "12.5" are all mid-figure; a following space or letter
+        # ends it. Trailing separators count because a decimal may still arrive.
+        return tail[-1].isdigit() or (len(tail) > 1 and tail[-1] in ".," and tail[-2].isdigit())
+
     @classmethod
     def _claim_scope(cls, text: str, figure: str = "", window: int = 160) -> str:
         """'aggregate' if the claim is about a derived quantity, else 'all'."""
@@ -190,6 +200,17 @@ class SentinelStream:
         self, span: str, scope: str = "all", metric: Optional[str] = None
     ) -> Optional[float]:
         """First number in `span` that the event log cannot produce."""
+        # A percentage that names no metric we know cannot be grounded at all.
+        # The event log has no percentage field, so every legitimate percentage
+        # is derived from a nameable metric (the bottleneck rate). Without this,
+        # "the off-contract discount was 12%" was accepted because 12.0 is the
+        # declared order-to-cash figure - a discount validated against a count
+        # of days. There is no discount data in the log; the honest answer is
+        # that the claim is ungrounded whatever its value.
+        if "%" in span and metric is None:
+            vals = self._numbers_in(span)
+            if vals:
+                return vals[0]
         for val in self._numbers_in(span):
             if not cm.is_grounded_number(val, scope=scope, metric=metric):
                 return val
@@ -290,12 +311,13 @@ class SentinelStream:
         answer = "".join(recovered).strip() or cm.ground_truth_answer(query)
         # The repaired answer is held to the same standard as the original: a
         # recovery that itself states an ungrounded figure is not a recovery.
-        residual = self._scan_new_figures(answer, 0, complete_only=False)[0]
-        if residual is not None:
+        regenerated_ok = self._scan_new_figures(answer, 0, complete_only=False)[0] is None
+        if not regenerated_ok:
             answer = cm.ground_truth_answer(query)
-            verified = False
-        else:
-            verified = True
+        # Report on the answer actually being returned, not on the draft that was
+        # discarded. Previously a clean deterministic fallback was still flagged
+        # ungrounded, because the flag described the regeneration it replaced.
+        verified = self._scan_new_figures(answer, 0, complete_only=False)[0] is None
 
         yield InterceptionEvent(
             kind="recovery",
@@ -306,7 +328,7 @@ class SentinelStream:
                 "retrieval_reason": repaired.get("reason"),
                 "regenerated": bool(recovered),
                 "all_figures_grounded": verified,
-                "fell_back_to_lookup": not verified,
+                "fell_back_to_lookup": not regenerated_ok,
             },
         )
 
@@ -357,7 +379,13 @@ class SentinelStream:
             trip_reason = None
             if ungrounded_value is not None:
                 trip_reason = "ungrounded_number"
-            elif consecutive >= self.breach_run:
+            elif consecutive >= self.breach_run and not self._mid_figure(text):
+                # A figure is being emitted right now, so the deterministic check
+                # is about to have an opinion on it. Digits are individually
+                # high-entropy, so letting the statistical layer fire first halts
+                # on "1" of "12.5" and reports semantic_entropy with no value,
+                # when one more token yields the far stronger "12.5 is not a
+                # compliance cycle time". Defer to the layer that can name it.
                 trip_reason = "semantic_entropy"
 
             if trip_reason:
