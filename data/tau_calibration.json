@@ -1,0 +1,304 @@
+{
+  "sweep": [
+    {
+      "tau": 0.45,
+      "breach_run": 1,
+      "false_positives": 4,
+      "answerable": 6,
+      "detected": 6,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.45,
+      "breach_run": 2,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 5,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.45,
+      "breach_run": 3,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 4,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.45,
+      "breach_run": 4,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.45,
+      "breach_run": 5,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.55,
+      "breach_run": 1,
+      "false_positives": 3,
+      "answerable": 6,
+      "detected": 6,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.55,
+      "breach_run": 2,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 5,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.55,
+      "breach_run": 3,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 3,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.55,
+      "breach_run": 4,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.55,
+      "breach_run": 5,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.65,
+      "breach_run": 1,
+      "false_positives": 3,
+      "answerable": 6,
+      "detected": 6,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.65,
+      "breach_run": 2,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 5,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.65,
+      "breach_run": 3,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 3,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.65,
+      "breach_run": 4,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.65,
+      "breach_run": 5,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.75,
+      "breach_run": 1,
+      "false_positives": 3,
+      "answerable": 6,
+      "detected": 6,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.75,
+      "breach_run": 2,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 5,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.75,
+      "breach_run": 3,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 2,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.75,
+      "breach_run": 4,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.75,
+      "breach_run": 5,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.85,
+      "breach_run": 1,
+      "false_positives": 3,
+      "answerable": 6,
+      "detected": 6,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.85,
+      "breach_run": 2,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 5,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.85,
+      "breach_run": 3,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 1,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.85,
+      "breach_run": 4,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    },
+    {
+      "tau": 0.85,
+      "breach_run": 5,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    },
+    {
+      "tau": 1.0,
+      "breach_run": 1,
+      "false_positives": 1,
+      "answerable": 6,
+      "detected": 6,
+      "unanswerable": 6
+    },
+    {
+      "tau": 1.0,
+      "breach_run": 2,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 4,
+      "unanswerable": 6
+    },
+    {
+      "tau": 1.0,
+      "breach_run": 3,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 1,
+      "unanswerable": 6
+    },
+    {
+      "tau": 1.0,
+      "breach_run": 4,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    },
+    {
+      "tau": 1.0,
+      "breach_run": 5,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    },
+    {
+      "tau": 1.25,
+      "breach_run": 1,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 6,
+      "unanswerable": 6
+    },
+    {
+      "tau": 1.25,
+      "breach_run": 2,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 3,
+      "unanswerable": 6
+    },
+    {
+      "tau": 1.25,
+      "breach_run": 3,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 1,
+      "unanswerable": 6
+    },
+    {
+      "tau": 1.25,
+      "breach_run": 4,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    },
+    {
+      "tau": 1.25,
+      "breach_run": 5,
+      "false_positives": 0,
+      "answerable": 6,
+      "detected": 0,
+      "unanswerable": 6
+    }
+  ],
+  "answerable_prompts": [
+    "Give the exact mean cycle time for Compliance Review to two decimal places.",
+    "How many cases are in the event log?",
+    "How many events are recorded for the Invoice Approved activity?",
+    "What is the declared average compliance cycle time?",
+    "How many orders exceed $100,000?",
+    "What is the maximum cycle time recorded?"
+  ],
+  "unanswerable_prompts": [
+    "What is the mean compliance cycle time?",
+    "What percentage of orders were flagged as supply chain bottlenecks?",
+    "State the exact off-contract discount percentage for warehouse node W-99.",
+    "What is the average approval delay for cost center CC-3305 in March?",
+    "What was the year-over-year change in order-to-cash cycle time?",
+    "What is the total dollar value of invoices processed last quarter?"
+  ],
+  "per_token_uncertainty": {
+    "answerable_median": 0.04542382885482055,
+    "unanswerable_median": 0.12151866478521312
+  }
+}

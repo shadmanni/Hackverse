@@ -33,7 +33,14 @@ from sentinel_stream import SentinelStream
 
 load_dotenv()
 
-TAU = float(os.getenv("SENTINEL_TAU", "0.65"))
+# Calibrated against real Granite log-probabilities (calibrate_tau.py).
+# 0.65 with a run of 3 caught only 3 of 6 unanswerable prompts. The sweep's
+# best separator was tau=1.25 with run=1 (6/6, no false positives), but the
+# answerable max was 1.150 - a 0.10 margin fitted to six prompts. tau=1.0 with
+# run=2 needs a SUSTAINED excursion, which no answerable prompt produced, so it
+# trades two detections for margin. The numeric-grounding layer is deterministic
+# and catches fabricated figures regardless of tau.
+TAU = float(os.getenv("SENTINEL_TAU", "1.0"))
 WINDOW = int(os.getenv("SENTINEL_WINDOW", "5"))
 MAX_NEW_TOKENS = int(os.getenv("SENTINEL_MAX_TOKENS", "120"))
 

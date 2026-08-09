@@ -65,7 +65,7 @@ class SentinelStream:
         window_size: int = 5,
         check_numbers: bool = True,
         max_new_tokens: int = 160,
-        breach_run: int = 3,
+        breach_run: int = 2,
         grounded_prompt: bool = True,
     ):
         """
@@ -86,6 +86,16 @@ class SentinelStream:
             The numeric layer deliberately does NOT wait for a run: an ungrounded
             figure is a deterministic fact-check, not a noisy statistic, so one
             occurrence is conclusive.
+
+            Default of 2 comes from calibrate_tau.py against real Granite
+            log-probabilities. Answerable prompts peaked at 0.387 (p90) and 1.150
+            (max) per-token uncertainty; unanswerable reached 1.059 (p90) and
+            2.873 (max). The sweep's best separator was tau=1.25 with run=1 -
+            6/6 detected, no false positives - but that tau sits only 0.10 above
+            the answerable maximum and is fitted to six prompts. tau=1.0 with
+            run=2 requires a SUSTAINED excursion, which no answerable prompt
+            produced at all, so it generalises better at the cost of two
+            detections the numeric layer catches anyway.
         """
         self.runner = runner
         self.retriever = retriever
