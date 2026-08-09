@@ -102,7 +102,15 @@ class SentinelRAGRetriever:
             with open(DATA_PATH, "r") as f:
                 data = json.load(f)
                 for ev in data.get("events", []):
-                    text = f"Activity: {ev.get('activity')} | Cycle Time: {ev.get('cycle_time_days', 0)} days | Case: {ev.get('case_id')} | Note: {ev.get('note', '')}"
+                    text = (
+                        f"Case {ev.get('case_id')}: {ev.get('activity')} "
+                        f"handled by {ev.get('resource', 'unknown')} "
+                        f"({ev.get('department', '')}, cost center {ev.get('cost_center', '')}). "
+                        f"Amount: ${ev.get('amount_usd', 0):,.2f}. "
+                        f"Cycle time so far: {ev.get('cycle_time_days', 0)} days."
+                    )
+                    if ev.get("note"):
+                        text += f" Note: {ev['note']}"
                     self.in_memory_docs.append({
                         "case_id": ev.get("case_id"),
                         "activity": ev.get("activity"),
