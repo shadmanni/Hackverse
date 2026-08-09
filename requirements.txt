@@ -16,6 +16,22 @@ torch>=2.2.0
 transformers>=4.40.0
 huggingface_hub>=0.23.0
 
+# IBM Data Prep Kit — PII redaction. NOT installable here, and that is the point:
+# dpk_pii_redactor's analyzer imports FlairRecognizer at module level, and flair
+# pins transformers to 4.57.6. Installing it in this venv would downgrade the
+# transformers that sentence-transformers embeds with. DPK is an offline INGEST
+# dependency, not a serving one, so it gets its own environment:
+#
+#   python3.13 -m venv .venv-dpk
+#   .venv-dpk/bin/pip install "data-prep-toolkit-transforms[pii_redactor]==1.1.8" \
+#                             "pymilvus[milvus_lite]" sentence-transformers
+#   .venv-dpk/bin/python phase2_ingestion_pipeline.py
+#
+# That run writes data/ingest_provenance.json, which is what /health reports.
+# First execution downloads flair/ner-english-large (~1.5 GB). Without this venv
+# the pipeline falls back to Presidio-minus-Flair, or to regex if that is absent
+# too, and says so rather than claiming DPK.
+
 # Tests
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
