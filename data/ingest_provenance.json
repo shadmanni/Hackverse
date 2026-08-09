@@ -1,0 +1,7 @@
+{
+  "pii_engine": "dpk-pii-redactor",
+  "collection": "celonis_ground_truth",
+  "vectors": 461,
+  "source": "/Users/shivansh-srivastava/Personal/Code/Hackverse/data/mock_celonis_data_large.json",
+  "embedding_model": "all-MiniLM-L6-v2"
+}
