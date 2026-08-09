@@ -191,13 +191,14 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
                                     context_history.append(delta_content)
                                     token_counter += 1
                                     
-                                    # Boundary check for K-path sampling (every 5 tokens or punctuation)
-                                    is_boundary = (token_counter % 5 == 0) or any(p in delta_content for p in punctuation_marks)
+                                    # Boundary check for K-path sampling (at clause endings or every 10 tokens)
+                                    is_boundary = (token_counter % 10 == 0) or any(p in delta_content for p in {".", ";", "\n", "?"})
                                     if is_boundary:
                                         current_prefix = "".join(context_history)
                                         paths = await semantic_entropy_engine.generate_k_paths(current_prefix, K=3, max_tokens=10)
                                         raw_se = semantic_entropy_engine.cluster_and_compute_entropy(paths)
                                         ema_score = firewall.update(raw_se)
+
                                         
                                         if firewall.check_breach():
                                             log_compliance_breach(query_str, ema_score)

@@ -121,13 +121,26 @@ class Semantic_Entropy_Engine:
             return overlap >= 0.65
 
         try:
+            import numpy as np
             pairs = [(text_a, text_b), (text_b, text_a)]
             scores = self.cross_encoder.predict(pairs)
-            entail_a_b = scores[0][1] if len(scores[0]) > 1 else scores[0][0]
-            entail_b_a = scores[1][1] if len(scores[1]) > 1 else scores[1][0]
-            return entail_a_b > 0.5 and entail_b_a > 0.5
+            if len(scores.shape) > 1 and scores.shape[1] >= 2:
+                # Calculate softmax probabilities across [contradiction, entailment, neutral]
+                exp_scores = np.exp(scores - np.max(scores, axis=-1, keepdims=True))
+                probs = exp_scores / exp_scores.sum(axis=-1, keepdims=True)
+                
+                # Check contradiction probabilities
+                contra_a_b = float(probs[0][0])
+                contra_b_a = float(probs[1][0])
+                
+                # Agreement means they do NOT contradict each other (neither is contradiction)
+                return contra_a_b < 0.20 and contra_b_a < 0.20
+            else:
+                return float(scores[0]) > 0.0 and float(scores[1]) > 0.0
         except Exception:
             return len(set(text_a.lower().split()) & set(text_b.lower().split())) >= 2
+
+
 
     async def _fetch_single_ollama_continuation(self, prompt: str, max_tokens: int, temperature: float, seed: int) -> str:
         """Helper to fetch a single completion path via Ollama's OpenAI-compatible HTTP API."""
