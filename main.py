@@ -8,7 +8,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 from entropy_engine import EntropyEngine
-
+from patching_engine import (
+    classify_interception,
+    create_patch_ticket,
+    get_all_tickets,
+    get_pending_tickets,
+    approve_ticket,
+    dismiss_ticket,
+)
 
 load_dotenv()
 
@@ -164,12 +171,12 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
             is_hallucinating, uncertainty, var = stream_engine.evaluate_token(token, logprob=-0.1, context_history=context_history)
             context_history.append(token)
             yield f"data: {token} \n\n"
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.03)
         
         # Simulate poison / hallucinated token logprob drop
         poison_token = "42.8_days_unverified_$5M"
         is_hallucinating, uncertainty, var = stream_engine.evaluate_token(poison_token, logprob=-2.85, context_history=context_history)
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.05)
         
         # Phase 3 telemetry logging for deterministic path
         print(f"\n[SENTINEL CIRCUIT BREAKER TRIPPED] Semantic Entropy Spike Detected!")
@@ -199,7 +206,7 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
             is_hallucinating, uncertainty, var = stream_engine.evaluate_token(token, logprob=-0.05, context_history=context_history)
             context_history.append(token)
             yield f"data: {token} \n\n"
-            await asyncio.sleep(0.08)
+            await asyncio.sleep(0.02)
 
         yield "data: [COMPLETED: GROUND TRUTH VERIFIED]\n\n"
 
@@ -224,7 +231,7 @@ async def unprotected_token_stream(query: str = None, graph: str = "p2p"):
         tokens = hallucinated_response.split(" ")
         for token in tokens:
             yield f"data: {token} \n\n"
-            await asyncio.sleep(0.12)
+            await asyncio.sleep(0.03)
         yield "data: [UNPROTECTED_COMPLETED: UNGROUNDED HALLUCINATION GENERATED]\n\n"
     else:
         q_text = query if query else "the exact Q3 compliance cycle time for vendor onboarding"
@@ -232,7 +239,7 @@ async def unprotected_token_stream(query: str = None, graph: str = "p2p"):
         tokens = safe_context.split(" ")
         for token in tokens:
             yield f"data: {token} \n\n"
-            await asyncio.sleep(0.08)
+            await asyncio.sleep(0.02)
         yield "data: [COMPLETED: GROUND TRUTH VERIFIED]\n\n"
 
 
@@ -259,10 +266,15 @@ async def trigger_self_healing_recovery(request: Request):
     Phase 3 Autonomous Recovery: Triggered when the circuit breaker trips.
     Invokes the watsonx autonomous fallback retriever to repair the context gap
     and return the verified Celonis ground truth tailored to the specific query and graph.
+    
+    Also runs gap classification and auto-generates a Self-Healing Knowledge
+    Patch Ticket for MISSING_KNOWLEDGE events (Feature 5a-b of the v3 spec).
     """
     payload = await request.json()
     query = payload.get("query", "")
     graph = payload.get("graph", "p2p")
+    entropy_score = float(payload.get("entropy_score", 1.5))
+    top_similarity = float(payload.get("top_similarity", 0.0))
     retriever_instance = get_retriever()
     
     # Extract salient query search terms
@@ -271,11 +283,13 @@ async def trigger_self_healing_recovery(request: Request):
     search_query = " ".join(clean_words) if clean_words else "compliance cycle time order"
 
     case_id = "CASE-10231"
-    vector_score = 0.992
+    vector_score = top_similarity if top_similarity > 0.01 else 0.12
+    retrieved_chunk_count = 0
     
     if retriever_instance:
         rag_result = retriever_instance.format_granite_context(search_query)
         chunks = rag_result.get("chunks", [])
+        retrieved_chunk_count = len(chunks)
         if chunks:
             top_chunk = chunks[0]
             verified_truth = top_chunk["text"]
@@ -286,6 +300,22 @@ async def trigger_self_healing_recovery(request: Request):
     else:
         verified_truth = f"Celonis Event Logs ({graph.upper()} Ground Truth): Verified activity recorded under {case_id} confirms SLA compliance standards."
 
+    # ── Self-Healing Knowledge Patching (spec Feature 5a-b) ──────────────────
+    gap_type = classify_interception(
+        query=query,
+        top_similarity=float(vector_score),
+        retrieved_chunk_count=retrieved_chunk_count,
+        entropy_score=entropy_score,
+    )
+    ticket = create_patch_ticket(
+        query=query,
+        gap_type=gap_type,
+        top_similarity=float(vector_score),
+        entropy_score=entropy_score,
+        graph_key=graph,
+    )
+    # ─────────────────────────────────────────────────────────────────────────
+
     return JSONResponse({
         "status": "RECOVERED_SUCCESSFULLY",
         "agent": "watsonx-Autonomous-Self-Healing-Agent",
@@ -293,8 +323,59 @@ async def trigger_self_healing_recovery(request: Request):
         "verified_ground_truth": verified_truth,
         "case_id": case_id,
         "vector_score": float(vector_score),
-        "action_taken": f"Context gap repaired for query '{query}'. Hallucinated token eliminated and replaced with verified Celonis audit record {case_id}."
+        "action_taken": f"Context gap repaired for query '{query}'. Hallucinated token eliminated and replaced with verified Celonis audit record {case_id}.",
+        # Self-Healing Patching fields
+        "gap_type": gap_type,
+        "patch_ticket": ticket,
     })
+
+
+# ============================================================================
+# Admin Self-Healing Knowledge Patch Queue  (spec Feature 5b-c)
+# ============================================================================
+
+@app.get("/admin/tickets")
+async def list_admin_tickets(pending_only: bool = Query(False)):
+    """Returns all Self-Healing Knowledge Patch tickets (or only pending ones)."""
+    tickets = get_pending_tickets() if pending_only else get_all_tickets()
+    return JSONResponse({"count": len(tickets), "tickets": tickets})
+
+
+@app.post("/admin/patch/approve")
+async def approve_patch_ticket(request: Request):
+    """
+    Admin approval stub: marks ticket as APPROVED and logs the Milvus
+    re-ingestion action that a production deployment would execute.
+    """
+    payload = await request.json()
+    ticket_id = payload.get("ticket_id", "")
+    approved_by = payload.get("approved_by", "admin")
+    if not ticket_id:
+        raise HTTPException(status_code=400, detail="ticket_id is required")
+    try:
+        updated = approve_ticket(ticket_id, approved_by=approved_by)
+        return JSONResponse({
+            "status": "APPROVED",
+            "ticket": updated,
+            "action": f"Re-ingestion of '{updated['doc_type']}' into '{updated['graph']}' collection queued.",
+        })
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/admin/patch/dismiss")
+async def dismiss_patch_ticket(request: Request):
+    """Dismiss a false-positive knowledge gap ticket."""
+    payload = await request.json()
+    ticket_id = payload.get("ticket_id", "")
+    if not ticket_id:
+        raise HTTPException(status_code=400, detail="ticket_id is required")
+    try:
+        updated = dismiss_ticket(ticket_id)
+        return JSONResponse({"status": "DISMISSED", "ticket": updated})
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
 
 
 if __name__ == "__main__":

@@ -582,7 +582,129 @@ if execute_btn and user_query:
         </div>
         """, unsafe_allow_html=True)
 
-# --- 8. Footer & Reference Metadata ---
+# --- 8. Admin / Self-Healing Knowledge Patch Queue Panel (spec Feature 5d) ---
+st.markdown("<br>", unsafe_allow_html=True)
+st.markdown("---")
+st.markdown("""
+<h3 style="color:#d97706; margin-bottom:4px;">Active Self-Healing & Knowledge Patch Queue</h3>
+<p style="color:#9ca3af; font-size:0.88rem; margin-top:0;">
+  Turning Sentinel-RAG from a <b>passive guardrail</b> into an <b>active system administrator</b>.
+  Missing-knowledge interceptions are auto-triaged below. Approve to queue Milvus re-ingestion.
+</p>
+""", unsafe_allow_html=True)
+
+@st.cache_data(ttl=3)
+def fetch_admin_tickets():
+    try:
+        r = requests.get("http://localhost:8000/admin/tickets?pending_only=false", timeout=2)
+        if r.status_code == 200:
+            return r.json().get("tickets", [])
+    except Exception:
+        pass
+    return []
+
+col_queue_hdr, col_queue_refresh = st.columns([4, 1])
+with col_queue_refresh:
+    if st.button("Refresh Queue"):
+        st.cache_data.clear()
+
+tickets = fetch_admin_tickets()
+
+if not tickets:
+    st.markdown("""
+    <div style="background:#171c21; border:1px solid #283038; border-radius:6px; padding:20px; color:#6c757d; font-family:'JetBrains Mono'; font-size:0.88rem; text-align:center;">
+        No patch tickets yet. Trigger a poison prompt to generate one.
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    status_colours = {
+        "PENDING_APPROVAL": ("#f59e0b", "#1f1a0a"),
+        "APPROVED":         ("#10b981", "#0a1f18"),
+        "DISMISSED":        ("#6b7280", "#111417"),
+    }
+
+    for ticket in tickets:
+        tid      = ticket.get("ticket_id", "?")
+        status_v = ticket.get("status", "PENDING_APPROVAL")
+        colour, bg = status_colours.get(status_v, ("#9ca3af", "#111417"))
+        gap_type  = ticket.get("gap_type", "MISSING_KNOWLEDGE")
+        title     = ticket.get("title", "Knowledge Gap Detected")
+        query_t   = ticket.get("query", "")
+        entity    = ticket.get("missing_entity", "—")
+        remed     = ticket.get("remediation", "—")
+        freq      = ticket.get("frequency", 1)
+        sim       = ticket.get("top_similarity", 0.0)
+        ent       = ticket.get("entropy_score", 0.0)
+        created   = ticket.get("created_at", "—")[:19].replace("T", " ")
+
+        freq_badge = f"<span style='background:#e11d48;color:#fff;border-radius:4px;padding:1px 7px;font-size:0.78rem;font-weight:700;'>×{freq}</span>" if freq > 1 else ""
+
+        st.markdown(f"""
+        <div style="background:{bg}; border:1px solid {colour}; border-radius:6px; padding:16px 20px; margin-bottom:14px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
+                <div>
+                    <span style="font-family:'JetBrains Mono'; font-size:0.78rem; color:#9ca3af;">{tid}</span>
+                    &nbsp;&nbsp;
+                    <span style="background:{colour};color:#000;padding:2px 9px;border-radius:4px;font-size:0.78rem;font-weight:700;">{status_v}</span>
+                    &nbsp;{freq_badge}
+                    <br>
+                    <span style="font-size:1.0rem;font-weight:700;color:#e5e7eb;">{title}</span>
+                </div>
+                <div style="text-align:right; font-size:0.78rem; color:#6c757d; font-family:'JetBrains Mono';">
+                    Gap Type: <b style="color:{colour};">{gap_type}</b><br>
+                    Created: {created}<br>
+                    Similarity: {sim:.3f} | Entropy: {ent:.3f}
+                </div>
+            </div>
+            <div style="font-size:0.85rem; color:#d1d5db; margin-bottom:6px;">
+                <b>Query:</b> <i>"{query_t[:120]}{'…' if len(query_t)>120 else ''}"</i>
+            </div>
+            <div style="font-size:0.85rem; color:#d1d5db; margin-bottom:6px;">
+                <b>Missing Entity:</b> <code style="color:#f59e0b;">{entity}</code>
+            </div>
+            <div style="background:#090b0d; border-left:3px solid {colour}; padding:8px 12px; border-radius:0 4px 4px 0; font-size:0.82rem; color:#e5e7eb; font-family:'JetBrains Mono'; margin-bottom:8px;">
+                <b>Suggested Remediation:</b><br>{remed}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if status_v == "PENDING_APPROVAL":
+            col_approve, col_dismiss, _ = st.columns([2, 2, 6])
+            with col_approve:
+                if st.button(f"Approve & Patch [{tid}]", key=f"approve_{tid}", type="primary"):
+                    try:
+                        r = requests.post(
+                            "http://localhost:8000/admin/patch/approve",
+                            json={"ticket_id": tid, "approved_by": "admin"},
+                            timeout=3,
+                        )
+                        if r.status_code == 200:
+                            st.success(f"Ticket {tid} approved. Milvus re-ingestion queued.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Approval failed: {r.text}")
+                    except Exception as e:
+                        st.error(f"Backend unreachable: {e}")
+            with col_dismiss:
+                if st.button(f"Dismiss [{tid}]", key=f"dismiss_{tid}"):
+                    try:
+                        r = requests.post(
+                            "http://localhost:8000/admin/patch/dismiss",
+                            json={"ticket_id": tid},
+                            timeout=3,
+                        )
+                        if r.status_code == 200:
+                            st.info(f"Ticket {tid} dismissed.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Dismiss failed: {r.text}")
+                    except Exception as e:
+                        st.error(f"Backend unreachable: {e}")
+
+
+# --- 9. Footer & Reference Metadata ---
 st.markdown("<br><br>", unsafe_allow_html=True)
 st.markdown("---")
 col_foot1, col_foot2 = st.columns(2)
@@ -590,4 +712,3 @@ with col_foot1:
     st.caption("Sentinel-RAG Architecture | IBM Data Prep Kit + IBM Granite + Celonis EMS")
 with col_foot2:
     st.markdown('<div style="text-align: right; font-size:0.8rem; color:#6c757d;">Powered by IBM Bob Orchestration & Antigravity Low-Latency Sidecar</div>', unsafe_allow_html=True)
-
