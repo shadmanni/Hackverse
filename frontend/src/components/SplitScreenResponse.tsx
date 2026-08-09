@@ -18,7 +18,7 @@ const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000";
 
 /** One SSE event from the interception proxy. */
 interface StreamEvent {
-  kind: "token" | "intercept" | "recovery" | "done" | "error";
+  kind: "token" | "intercept" | "recovery_start" | "recovery_token" | "recovery" | "done" | "error";
   text?: string;
   logprob?: number;
   probability?: number;
@@ -40,6 +40,11 @@ interface StreamEvent {
   entropy_overhead_ms?: number;
   overhead_pct?: number;
   message?: string;
+  // recovery
+  strategy?: string;
+  retrieval_reason?: string;
+  regenerated?: boolean;
+  all_figures_grounded?: boolean;
 }
 
 interface PanelState {
@@ -147,7 +152,13 @@ interface Props {
 export default function SplitScreenResponse({ query, graphName }: Props) {
   const [left, setLeft] = useState<PanelState>(EMPTY);   // unprotected
   const [right, setRight] = useState<PanelState>(EMPTY); // sentinel
-  const [healing, setHealing] = useState<{ text: string; strategy: string } | null>(null);
+  const [healing, setHealing] = useState<{
+    strategy: string;
+    retrievalReason?: string;
+    text: string;
+    streaming: boolean;
+    verified?: boolean;
+  } | null>(null);
   const tau = right.intercept?.tau ?? 0.65;
   const startedAt = useRef<number>(0);
 
@@ -170,6 +181,8 @@ export default function SplitScreenResponse({ query, graphName }: Props) {
               };
             case "intercept":
               return { ...p, intercept: e, done: true };
+            case "recovery_start":
+            case "recovery_token":
             case "recovery":
               return p;
             case "done":
@@ -200,8 +213,23 @@ export default function SplitScreenResponse({ query, graphName }: Props) {
           `${BACKEND}/stream?query=${q}`,
           (e) => {
             apply(setRight)(e);
-            if (e.kind === "recovery") {
-              setHealing({ text: e.text ?? "", strategy: "deterministic_event_log_lookup" });
+            if (e.kind === "recovery_start") {
+              setHealing({
+                strategy: e.strategy ?? "context_repair",
+                retrievalReason: e.retrieval_reason,
+                text: "",
+                streaming: true,
+              });
+            } else if (e.kind === "recovery_token") {
+              setHealing((h) => (h ? { ...h, text: h.text + (e.text ?? "") } : h));
+            } else if (e.kind === "recovery") {
+              setHealing((h) => ({
+                strategy: e.strategy ?? h?.strategy ?? "context_repair",
+                retrievalReason: e.retrieval_reason ?? h?.retrievalReason,
+                text: e.text ?? h?.text ?? "",
+                streaming: false,
+                verified: e.all_figures_grounded,
+              }));
             }
           },
           ctrl.signal,
@@ -404,14 +432,36 @@ export default function SplitScreenResponse({ query, graphName }: Props) {
                   className="mt-3 bg-[#0a1117] border-l-2 border-emerald-500 p-3 rounded-r-md overflow-hidden"
                 >
                   <div className="flex items-center gap-1.5 text-amber-400 text-[11px] font-mono font-bold mb-1">
-                    <Bot className="w-4 h-4" />
-                    Autonomous Recovery · {healing.strategy}
+                    <Bot className={`w-4 h-4 ${healing.streaming ? "animate-pulse" : ""}`} />
+                    Self-Healing Agent · {healing.strategy}
                   </div>
-                  <p className="text-[11px] text-slate-200 leading-relaxed break-words">{healing.text}</p>
-                  <div className="mt-2 flex items-center gap-1 text-[10px] text-emerald-400 font-mono border-t border-slate-800/80 pt-1.5">
-                    <CheckCircle2 className="w-3 h-3" />
-                    every figure verified against the event log
-                  </div>
+                  {healing.retrievalReason && (
+                    <p className="text-[10px] text-slate-500 font-mono mb-1.5">
+                      context gap repaired — {healing.retrievalReason}
+                    </p>
+                  )}
+                  <p className="text-[11px] text-slate-200 leading-relaxed break-words">
+                    {healing.text || (
+                      <span className="text-slate-500 italic">re-querying Milvus and regenerating…</span>
+                    )}
+                    {healing.streaming && (
+                      <span className="inline-block w-1.5 h-3 bg-amber-400 ml-1 animate-pulse" />
+                    )}
+                  </p>
+                  {!healing.streaming && (
+                    <div className="mt-2 flex items-center gap-1 text-[10px] font-mono border-t border-slate-800/80 pt-1.5">
+                      {healing.verified ? (
+                        <span className="flex items-center gap-1 text-emerald-400">
+                          <CheckCircle2 className="w-3 h-3" />
+                          regenerated under grounding — every figure verified against the event log
+                        </span>
+                      ) : (
+                        <span className="text-amber-400">
+                          regeneration still ungrounded — fell back to a deterministic log lookup
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </motion.div>
               )}
             </AnimatePresence>

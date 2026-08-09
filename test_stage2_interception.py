@@ -61,10 +61,19 @@ class TestCircuitBreakerActuallyBreaks(unittest.TestCase):
         evs = run(script)
         kinds = [e.kind for e in evs]
         self.assertIn("intercept", kinds, "breaker never tripped on a fabricated figure")
-        self.assertLess(len(evs), len(script), "stream continued past the interception")
-        # Nothing may be emitted after the intercept except the recovery event.
+        # Count ORIGINAL-stream tokens only. Total event count is no longer a
+        # proxy for "did decoding stop": recovery regenerates a grounded answer
+        # and streams its own recovery_token events after the halt.
+        self.assertLess(
+            len([e for e in evs if e.kind == "token"]), len(script),
+            "the intercepted stream kept decoding past the halt",
+        )
+        # After the intercept, only recovery events may follow - never another
+        # token from the stream that was cut off.
         idx = kinds.index("intercept")
-        self.assertEqual(kinds[idx + 1:], ["recovery"])
+        self.assertNotIn("token", kinds[idx + 1:], "original stream resumed after interception")
+        self.assertEqual(kinds[idx + 1], "recovery_start")
+        self.assertEqual(kinds[-1], "recovery")
 
     def test_ungrounded_number_is_caught_even_when_confident(self):
         """The failure mode entropy alone cannot see: a confident fabrication."""

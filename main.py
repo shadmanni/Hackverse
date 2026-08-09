@@ -181,12 +181,20 @@ async def stream_tokens(query: str = Query(None)):
         if not _state["runner"]:
             yield sse("error", message="Granite model not loaded")
             return
+        # The proxy audits the request the application actually sends, and a
+        # naive integration sends no retrieved context - that is the deployment
+        # Sentinel exists to protect. Running the SAME prompt as
+        # /unprotected_stream also makes the split-screen a controlled
+        # experiment: one variable differs between the panels, the proxy itself.
+        # Retrieval is not skipped, it is deferred to the recovery pass, where
+        # the context gap is repaired and the answer regenerated under grounding.
         stream = SentinelStream(
             runner=_state["runner"],
             retriever=_state["retriever"],
             tau=TAU,
             window_size=WINDOW,
             max_new_tokens=MAX_NEW_TOKENS,
+            grounded_prompt=False,
         )
         try:
             async for ev in _drain(stream.run(q)):

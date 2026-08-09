@@ -223,7 +223,10 @@ class SentinelStream:
             payload={
                 "reason": reason,
                 "token": tok,
-                "token_index": getattr(step, "index", -1),
+                # The trailing-figure path has no step object; the offending
+                # figure is the last thing emitted, so report that position
+                # rather than a -1 the UI would render as "token #-1".
+                "token_index": step.index if step is not None else max(emitted - 1, 0),
                 "logprob": round(step.logprob, 4) if step else None,
                 "probability": round(step.prob, 4) if step else None,
                 "uncertainty": round(uncertainty, 4),
@@ -238,13 +241,55 @@ class SentinelStream:
                 "partial_output": "".join(history),
             },
         )
+        # Autonomous recovery: re-decode the SAME question with the Celonis
+        # context injected. This is a second real generation, not a lookup
+        # string - the agent repairs the context gap and the model answers again
+        # under grounding, which is the whole point of the fallback.
+        repaired = self._context_for(query)
+        yield InterceptionEvent(
+            kind="recovery_start",
+            text="",
+            payload={
+                "strategy": "milvus_context_repair_and_regenerate",
+                "query": query,
+                "retrieval_reason": repaired.get("reason"),
+            },
+        )
+        recovered: List[str] = []
+        try:
+            for step in self.runner.stream(
+                self.runner.build_prompt(query, repaired.get("context"), grounded=True),
+                max_new_tokens=self.max_new_tokens,
+            ):
+                recovered.append(step.text)
+                yield InterceptionEvent(
+                    kind="recovery_token",
+                    text=step.text,
+                    payload={"logprob": round(step.logprob, 4), "index": step.index},
+                )
+        except Exception as err:
+            print(f"[Sentinel] recovery generation failed ({err}); falling back to the log lookup.")
+
+        answer = "".join(recovered).strip() or cm.ground_truth_answer(query)
+        # The repaired answer is held to the same standard as the original: a
+        # recovery that itself states an ungrounded figure is not a recovery.
+        residual = self._scan_new_figures(answer, 0, complete_only=False)[0]
+        if residual is not None:
+            answer = cm.ground_truth_answer(query)
+            verified = False
+        else:
+            verified = True
+
         yield InterceptionEvent(
             kind="recovery",
-            text=cm.ground_truth_answer(query),
+            text=answer,
             payload={
-                "strategy": "deterministic_event_log_lookup",
+                "strategy": "milvus_context_repair_and_regenerate",
                 "query": query,
-                "retrieval_reason": rag.get("reason"),
+                "retrieval_reason": repaired.get("reason"),
+                "regenerated": bool(recovered),
+                "all_figures_grounded": verified,
+                "fell_back_to_lookup": not verified,
             },
         )
 
