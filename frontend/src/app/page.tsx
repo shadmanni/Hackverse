@@ -308,6 +308,7 @@ export default function Home() {
                         query={m.query}
                         graphName={m.graphName}
                         onDone={() => handleDone(m.id)}
+                        tau={health?.circuit_breaker_tau}
                       />
                     )}
                   </div>

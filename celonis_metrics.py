@@ -59,6 +59,15 @@ def process_profile(path: str = str(DATA_PATH)) -> Dict[str, Any]:
         vals = blob.pop("values")
         blob["mean_cycle_days"] = round(statistics.mean(vals), 2)
         blob["max_cycle_days"] = max(vals)
+        # No per-activity minimum, deliberately. Exposing one would let a range
+        # bind both endpoints ("Compliance Review cycle times range from 4 to 16
+        # days" currently halts on 4), but metric_aliases is the UNION of a
+        # metric's statistics, so it also makes every activity's smallest cycle
+        # time admissible as any unqualified figure for that activity. Measured:
+        # Invoice Approved's minimum is 3, which made "3 events are recorded for
+        # the Invoice Approved activity" - a fabrication caught live on a
+        # green-path demo prompt, real count 150 - pass again. A hand-authored
+        # range is worth less than a detection observed in model output.
         blob["event_count"] = len(vals)
 
     # The declared block wins where it exists: it is the stated ground truth.
@@ -188,6 +197,12 @@ def metric_statistics(path: str = str(DATA_PATH)) -> Dict[str, Dict[str, frozens
     add("order to cash", mean=p["declared_avg_order_to_cash_days"])
     add("bottleneck",
         mean=act.get("Supply Chain Bottleneck Flagged", {}).get("mean_cycle_days"),
+        # The one activity phrase that was missing its own maximum. The aggregate
+        # block writes "Activity 'Supply Chain Bottleneck Flagged': 38 events,
+        # mean cycle 12.47 days (max 20)", so the check rejected 20 - a value it
+        # had just handed the model as fact - the moment anything bound that line
+        # to this metric.
+        max=act.get("Supply Chain Bottleneck Flagged", {}).get("max_cycle_days"),
         count=[act.get("Supply Chain Bottleneck Flagged", {}).get("event_count"),
                p["declared_orders_flagged_for_bottleneck"]],
         rate=round(act.get("Supply Chain Bottleneck Flagged", {}).get("event_count", 0)
@@ -210,6 +225,15 @@ def metric_statistics(path: str = str(DATA_PATH)) -> Dict[str, Dict[str, frozens
         mean=p["high_value_mean_cycle_days"], threshold=HIGH_VALUE_USD)
     add("high value orders", count=p["high_value_orders"],
         mean=p["high_value_mean_cycle_days"], threshold=HIGH_VALUE_USD)
+    # Deliberately NOT aliased by its defining criterion. Adding "$100,000" as a
+    # phrase for this metric would let "The 122 orders in excess of $100,000
+    # have a mean cycle time of 9.11 days" bind - a true sentence that currently
+    # halts - but the same alias then binds "There were 393 orders above
+    # $100,000", where 393 is the EVENT count and the sentence says orders. That
+    # claim must stay `unverifiable`, not become `verified` or `contradicted`:
+    # the criterion alone does not say which population is being counted, and
+    # guessing is the overclaim audit_figures exists to prevent. The "in excess
+    # of" phrasing stays a known gap; see test_grounding_regression.
     return out
 
 
@@ -224,10 +248,30 @@ _GENERIC_ALIASES = frozenset({"cycle time"})
 # the cost of a wrong statistic binding is halting a correct answer, while the
 # cost of missing one is only falling back to the behaviour that already exists.
 _STATISTIC_WORDS: Dict[str, Tuple[str, ...]] = {
-    "mean": ("mean", "average", "avg", "on average", "typically"),
+    "mean": ("mean", "average", "avg", "on average", "typically",
+             # Adverbs of central tendency. They are unambiguous - none of them
+             # can mark a count or an extremum - and without them "Compliance
+             # Review usually takes 16 days" bound no statistic, so 16 passed on
+             # set membership as that activity's MAX while the sentence asserts
+             # its mean of 10.43.
+             "usually", "normally", "generally", "typical"),
     "median": ("median",),
-    "max": ("maximum", "longest", "slowest", "worst", "at most", "peak", "up to"),
-    "count": ("number of", "how many", "count of", "total of"),
+    "max": ("maximum", "longest", "slowest", "worst", "at most", "peak", "up to",
+            # "highest" is the ordinary superlative for a duration and was absent,
+            # so "The highest cycle time was 8.5 days" quoted the MEAN unchallenged.
+            "highest"),
+    # Bare "count" earns its place by creating AMBIGUITY, not by binding. In
+    # "Compliance Review has the highest event count at 122" the superlative
+    # belongs to the count, not to a duration - but only "highest" matched, so
+    # 122 was checked against that activity's max of 16 and a true sentence
+    # halted. With both words present bound_statistic sees two candidates and
+    # returns None, which restores the wider whole-metric check. Declining to
+    # guess is the correct answer to a genuinely ambiguous sentence.
+    # "times" is the one predicate form of a count narrow enough to be safe:
+    # "'Compliance Review' occurs 16 times" asserts a count, and 16 is that
+    # activity's max. "events" was tried and rejected - it appears in almost
+    # every statistic span in this domain, so it bound counts to means.
+    "count": ("number of", "how many", "count of", "total of", "count", "times"),
     "rate": ("percentage", "percent", "proportion", "share of", "rate of"),
 }
 
@@ -377,6 +421,23 @@ def bound_metrics(text: str, window: int = 200) -> list:
     return [h[2] for h in sorted(specific, reverse=True)] + [
         h[2] for h in sorted((h for h in hits if h[2] in _GENERIC_ALIASES), reverse=True)
     ]
+
+
+def names_specific_metric(text: str, window: int = 200) -> bool:
+    """
+    True when `text` names a metric that is more than a bare dimension.
+
+    Used to decide how far back a metric span has to reach: a clause that names
+    only "cycle time" has not really said which metric it means, so the title or
+    parenthetical before it is still in play.
+    """
+    recent = text[-window:].lower()
+    return any(k in recent for k in metric_aliases() if k not in _GENERIC_ALIASES)
+
+
+def is_generic_metric(metric: Optional[str]) -> bool:
+    """True when the phrase names a dimension rather than a specific metric."""
+    return metric in _GENERIC_ALIASES
 
 
 def is_grounded_number(

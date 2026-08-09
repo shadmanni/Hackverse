@@ -289,23 +289,45 @@ class TestCandidateFanPointsAtTheFigure(unittest.IsolatedAsyncioTestCase):
     # "87.6" is not a figure the event log can produce. Tokens:
     #   0 "The"  1 " mean"  2 " is"  3 " 87"  4 "."  5 "6"  6 " days"
     # The breaker trips at 6, because that is where the figure TERMINATES.
-    # The value was chosen at 5. Those are different tokens, which is the
-    # entire point.
+    # The value was chosen across 3-5. Those are different tokens from the
+    # halt, which is the entire point.
     SCRIPT = [("The", 0.98), (" mean", 0.97), (" is", 0.96),
               (" 87", 0.99), (".", 0.99), ("6", 0.99), (" days", 0.98)]
+
+    # Tokens 3 and 5 both carry a figure at equal mass here, and the rule keeps
+    # the STRONGEST commitment, resolving a tie to the earlier one. That lands
+    # on the leading digits, which is also the more useful fan to show: the
+    # alternatives to "87" are rival values, whereas the alternatives to the
+    # trailing "6" are only rival last decimal places.
+    DECISION, HALT = 3, 6
 
     async def test_fan_comes_from_the_figure_not_the_halting_token(self):
         evs = await run(self.SCRIPT)
         icept = [e for e in evs if e.kind == "intercept"][0].payload
 
-        self.assertEqual(icept["candidates_token_index"], 5)
+        self.assertEqual(icept["candidates_token_index"], self.DECISION)
         self.assertNotEqual(
-            icept["candidates_token_index"], 6,
+            icept["candidates_token_index"], self.HALT,
             "reporting the halting token shows the model choosing between words "
             "at the exact moment we claim it was choosing between numbers",
         )
         self.assertTrue(any(c["cluster"].startswith("#") for c in icept["candidates"]),
                         f"decision token carried no figure: {icept['candidates']}")
+
+    async def test_decision_is_the_strongest_figure_not_the_latest(self):
+        """
+        A trace digit in an otherwise prose distribution must not displace the
+        real one. On live output this reported the decision as "0% of the mass -
+        mostly writing prose", which is what the terminal would have shown a
+        judge as the moment the figure was chosen.
+        """
+        # Token 5 carries a figure at 1% mass; token 3 carries one at 99%.
+        script = [("The", 0.98), (" mean", 0.97), (" 87", 0.99),
+                  (".", 0.99), ("6", 0.01), (" days", 0.98)]
+        evs = await run(script)
+        icept = [e for e in evs if e.kind == "intercept"][0].payload
+        self.assertEqual(icept["candidates_token_index"], 2,
+                         "a 1%-mass digit displaced the 99% one")
 
     async def test_trailing_figure_still_carries_a_fan(self):
         # Ends ON the figure, so the stream is exhausted before the check runs
@@ -314,7 +336,7 @@ class TestCandidateFanPointsAtTheFigure(unittest.IsolatedAsyncioTestCase):
         icept = [e for e in evs if e.kind == "intercept"][0].payload
 
         self.assertIsNotNone(icept["candidates"], "trailing-figure halt lost the fan")
-        self.assertEqual(icept["candidates_token_index"], 5)
+        self.assertEqual(icept["candidates_token_index"], self.DECISION)
 
     async def test_clean_stream_reports_no_fan(self):
         # Nothing was intercepted, so there is no figure to explain.

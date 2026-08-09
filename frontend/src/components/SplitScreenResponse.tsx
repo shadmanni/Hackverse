@@ -57,6 +57,8 @@ interface StreamEvent {
 interface PanelState {
   text: string;
   uncertainty: number[];
+  /** per-token semantic entropy — the same top-k, clustered by VALUE first */
+  semantic: number[];
   done: boolean;
   intercept: StreamEvent | null;
   summary: StreamEvent | null;
@@ -66,6 +68,7 @@ interface PanelState {
 const EMPTY: PanelState = {
   text: "",
   uncertainty: [],
+  semantic: [],
   done: false,
   intercept: null,
   summary: null,
@@ -112,8 +115,24 @@ async function readSSE(
   }
 }
 
-/** Uncertainty per token against tau. Breaching points are marked. */
-function EntropyChart({ series, tau }: { series: number[]; tau: number }) {
+/**
+ * Two measures over the same tokens, which is the entire argument.
+ *
+ * GREEN  token uncertainty - how unsure the model was about the next token.
+ *        Spikes on sentence openings and on wording choices, not only on
+ *        fabrication. Measured live: the token " across" scored 1.24 here
+ *        while being a purely stylistic choice.
+ * AMBER  semantic entropy - the SAME top-k, clustered by value before the
+ *        entropy is taken. That same " across" token scores 0.00, because
+ *        every candidate meant the same thing. It rises only where rival
+ *        FIGURES are on the table.
+ *
+ * Where the two lines sit together, the model is choosing words. Where they
+ * separate, it is choosing a number. A single green spike is not evidence of
+ * anything, which is why the breaker needs a sustained run and a deterministic
+ * second layer.
+ */
+function EntropyChart({ series, semantic, tau }: { series: number[]; semantic?: number[]; tau?: number }) {
   const W = 260;
   const H = 54;
   if (series.length < 2) {
@@ -123,22 +142,57 @@ function EntropyChart({ series, tau }: { series: number[]; tau: number }) {
       </div>
     );
   }
-  const peak = Math.max(tau * 1.6, ...series);
+  // With no threshold known, plot the trace but draw NO threshold line and NO
+  // breach markers. Substituting a placeholder would mark every token as a
+  // breach against a number the backend never used.
+  const sem = (semantic ?? []).slice(0, series.length);
+  // Both lines share one scale, or "they separate here" would be an artefact of
+  // two different axes rather than something the model actually did.
+  const peak = Math.max(...(tau === undefined ? series : [tau * 1.6, ...series]), ...sem);
   const x = (i: number) => (i / (series.length - 1)) * W;
   const y = (v: number) => H - (v / peak) * H;
-  const path = series.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const line = (s: number[]) =>
+    s.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const path = line(series);
+  const semPath = sem.length >= 2 ? line(sem) : null;
 
   return (
+   <>
     <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-[54px]" preserveAspectRatio="none"
-         role="img" aria-label={`Uncertainty per token against threshold ${tau}`}>
+         role="img" aria-label={tau === undefined
+           ? "Uncertainty per token; threshold not yet known"
+           : `Uncertainty per token against threshold ${tau}`}>
       {/* threshold */}
-      <line x1="0" y1={y(tau)} x2={W} y2={y(tau)} stroke="#f43f5e" strokeWidth="1"
-            strokeDasharray="3 3" opacity="0.75" />
+      {tau !== undefined && (
+        <line x1="0" y1={y(tau)} x2={W} y2={y(tau)} stroke="#f43f5e" strokeWidth="1"
+              strokeDasharray="3 3" opacity="0.75" />
+      )}
+      {semPath && (
+        <path d={semPath} fill="none" stroke="#f59e0b" strokeWidth="1.2" opacity="0.9" />
+      )}
       <path d={path} fill="none" stroke="#34d399" strokeWidth="1.4" />
-      {series.map((v, i) =>
+      {tau !== undefined && series.map((v, i) =>
         v > tau ? <circle key={i} cx={x(i)} cy={y(v)} r="1.9" fill="#f43f5e" /> : null,
       )}
     </svg>
+    {/* Without this the two traces are indistinguishable, and the whole point
+        is which one is which. */}
+    <div className="flex items-center gap-3 mt-1 text-[9px] font-mono text-slate-500">
+      <span className="flex items-center gap-1">
+        <span className="w-3 h-px bg-[#34d399] inline-block" /> token (wording)
+      </span>
+      {semPath && (
+        <span className="flex items-center gap-1">
+          <span className="w-3 h-px bg-[#f59e0b] inline-block" /> semantic (value)
+        </span>
+      )}
+      {tau !== undefined && (
+        <span className="flex items-center gap-1">
+          <span className="w-3 h-px border-t border-dashed border-rose-500 inline-block" /> τ {tau}
+        </span>
+      )}
+    </div>
+   </>
   );
 }
 
@@ -155,9 +209,17 @@ interface Props {
   query: string;
   graphName: string;
   onDone?: () => void;
+  /**
+   * The threshold the backend is actually serving, read from /health by the
+   * page. Passed in rather than defaulted here: a literal fallback silently
+   * went stale when the measured tau moved 0.65 -> 0.85, so this component
+   * drew breach dots against 0.65 while the sidebar displayed 0.850 from
+   * /health on the same screen. Two different thresholds, one page.
+   */
+  tau?: number;
 }
 
-export default function SplitScreenResponse({ query, graphName, onDone }: Props) {
+export default function SplitScreenResponse({ query, graphName, onDone, tau: tauProp }: Props) {
   const [left, setLeft] = useState<PanelState>(EMPTY);   // unprotected
   const [right, setRight] = useState<PanelState>(EMPTY); // sentinel
   const [healing, setHealing] = useState<{
@@ -168,7 +230,9 @@ export default function SplitScreenResponse({ query, graphName, onDone }: Props)
     verified?: boolean;
     fellBack?: boolean;
   } | null>(null);
-  const tau = right.intercept?.tau ?? 0.65;
+  // The intercept reports the tau it actually applied, so it wins. Otherwise
+  // the value /health reported at load. Never a literal - see Props.tau.
+  const tau = right.intercept?.tau ?? tauProp;
   const startedAt = useRef<number>(0);
 
   useEffect(() => {
@@ -187,6 +251,7 @@ export default function SplitScreenResponse({ query, graphName, onDone }: Props)
                 ...p,
                 text: p.text + (e.text ?? ""),
                 uncertainty: [...p.uncertainty, e.uncertainty ?? 0],
+                semantic: [...p.semantic, e.semantic_entropy ?? 0],
               };
             case "intercept":
               return { ...p, intercept: e, done: true };
@@ -259,8 +324,15 @@ export default function SplitScreenResponse({ query, graphName, onDone }: Props)
   const leftTokens = left.summary?.tokens ?? left.uncertainty.length;
   const rightTokens = right.intercept?.tokens_before_halt ?? right.summary?.tokens ?? right.uncertainty.length;
   const halted = right.intercept !== null;
-  const saved = halted ? Math.max(0, leftTokens - rightTokens) : 0;
-  const savedPct = halted && leftTokens > 0 ? Math.round((saved / leftTokens) * 100) : 0;
+  // There is deliberately no "tokens saved" figure here any more. It was
+  // leftTokens - rightTokens, clamped at zero: two independent generations that
+  // each stop at their own natural length, so the difference measures nothing.
+  // On both recorded interceptions the raw value was NEGATIVE (13-15 and 26-52)
+  // and the clamp displayed it as a self-congratulatory "0 (0%)".
+  // demo_run_of_show.py already removed the same measure from the CLI for the
+  // same reason. Recovery re-decodes against the same budget, so the protected
+  // path in fact spends MORE compute - the honest claim is where it stopped,
+  // not what it saved.
 
   const fmtMs = (v?: number) => (v === undefined ? "—" : `${v.toFixed(0)} ms`);
   const overhead =
@@ -314,7 +386,7 @@ export default function SplitScreenResponse({ query, graphName, onDone }: Props)
           </div>
 
           <div className="mt-4 border-t border-slate-800/80 pt-3">
-            <EntropyChart series={left.uncertainty} tau={tau} />
+            <EntropyChart series={left.uncertainty} semantic={left.semantic} tau={tau} />
             <div className="grid grid-cols-3 gap-2 mt-3">
               <Stat label="TOKENS EMITTED" value={left.done ? String(leftTokens) : "…"} tone="text-rose-400" />
               <Stat label="DECODE TIME" value={fmtMs(left.summary?.elapsed_ms)} tone="text-amber-400" />
@@ -352,7 +424,7 @@ export default function SplitScreenResponse({ query, graphName, onDone }: Props)
             <div className="flex items-center justify-between text-[11px] text-slate-500 border-b border-slate-900 pb-2 mb-3">
               <span className="flex items-center gap-1.5 text-slate-400">
                 <Cpu className="w-3.5 h-3.5 text-emerald-400" />
-                ENTROPY MONITOR · τ = {tau}
+                ENTROPY MONITOR · τ = {tau ?? "—"}
               </span>
               {halted ? (
                 <span className="text-rose-400 font-bold flex items-center gap-1">
@@ -534,11 +606,11 @@ export default function SplitScreenResponse({ query, graphName, onDone }: Props)
           </div>
 
           <div className="mt-4 border-t border-slate-800/80 pt-3">
-            <EntropyChart series={right.uncertainty} tau={tau} />
+            <EntropyChart series={right.uncertainty} semantic={right.semantic} tau={tau} />
             <div className="grid grid-cols-3 gap-2 mt-3">
               <Stat
-                label="TOKENS SAVED"
-                value={halted ? `${saved} (${savedPct}%)` : right.done ? "grounded" : "…"}
+                label="DECODE HALTED"
+                value={halted ? `token ${rightTokens}` : right.done ? "not halted" : "…"}
                 tone="text-emerald-400"
               />
               <Stat
@@ -554,10 +626,11 @@ export default function SplitScreenResponse({ query, graphName, onDone }: Props)
 
       <p className="text-[10px] text-slate-500 font-mono flex items-center gap-1.5">
         <Activity className="w-3 h-3" />
-        Both panels are the same local Granite model running the identical prompt, and
-        neither is given retrieved context up front — so exactly one variable differs, the
-        audit itself. The right panel is scored per token and retrieves only once it
-        intercepts, to repair the gap it found. Nothing is pre-scripted.
+        Both panels are the same local Granite model on the identical question. Left is the
+        naive integration: no retrieved context, no audit. Right is the deployed
+        configuration: retrieved Celonis context <em>and</em> a per-token audit on top — so
+        what it catches are the errors retrieval alone does not prevent. Nothing is
+        pre-scripted.
       </p>
     </div>
   );

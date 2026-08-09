@@ -52,11 +52,34 @@ _NUM_RE = re.compile(
     # were about the comma's clause. Harmless-looking, but it was reporting the
     # log's own threshold as a contradiction.
     r"-?\$?\d(?:[\d,]*\d)?(?:\.\d+)?%?"
+    # A scale suffix is part of the figure, not the prose after it. Without this
+    # "Total logged order value is $110.6M" matched "$110" - the trailing
+    # lookahead rejected "$110.6" because 'M' follows, so the regex backtracked
+    # to the integer part - and reported 110 as ungrounded on a sentence whose
+    # real value, $110,559,589.27, is the log's own total. The spelled-out form
+    # failed the same way for a different reason: 110.6 parsed cleanly and was
+    # then compared against the log as though it meant 110.6 dollars.
+    r"(?:[KMB](?![A-Za-z])|\s+(?:thousand|million|billion))?"
     # ':' is excluded on the LEFT only. Excluding it on the right broke
     # "Orders above $100,000:" in the aggregate block - the match backtracked to
     # "$100" and reported 100 as ungrounded. A colon BEFORE a number is a clock;
     # a colon after one is punctuation.
     r"(?![A-Za-z0-9_\-])"        # not followed by identifier characters
+)
+
+# Multipliers for the suffix above, keyed by the lowercased tail of the match.
+_SCALE = {"thousand": 1e3, "million": 1e6, "billion": 1e9, "k": 1e3, "m": 1e6, "b": 1e9}
+
+# A comparison BASELINE is a claim about a different metric by construction:
+#
+#   "Compliance Review averages 10.43 days versus an overall mean of 8.5 days."
+#
+# Both figures are the log's own, but neither ';' nor ',' separates them, so the
+# metric span for 8.5 reached back over "Compliance Review" and checked the
+# OVERALL mean against that activity's - halting a true sentence. Metric binding
+# stops here; the connective marks where one claim ends and its foil begins.
+_CONTRAST_BREAK = re.compile(
+    r"\b(?:versus|vs\.?|compared\s+(?:to|with)|as\s+against)\b", re.IGNORECASE
 )
 
 
@@ -231,10 +254,17 @@ class SentinelStream:
     def _numbers_in(span: str) -> List[float]:
         out = []
         for m in _NUM_RE.findall(span):
-            cleaned = m.replace("$", "").replace(",", "").replace("%", "").rstrip(".")
+            raw, scale = m.strip(), 1.0
+            low = raw.lower()
+            # Longest suffix first, so "million" is not read as a bare "m".
+            for suffix, factor in _SCALE.items():
+                if low.endswith(suffix) and len(raw) > len(suffix):
+                    raw, scale = raw[: -len(suffix)], factor
+                    break
+            cleaned = raw.replace("$", "").replace(",", "").replace("%", "").strip().rstrip(".")
             if cleaned and cleaned not in {"-", "."}:
                 try:
-                    out.append(float(cleaned))
+                    out.append(float(cleaned) * scale)
                 except ValueError:
                     pass
         return out
@@ -300,9 +330,17 @@ class SentinelStream:
         lb = list(_CLAUSE_BREAK.finditer(text[left:start]))
         if lb:
             left += lb[-1].end()
-        rb = _CLAUSE_BREAK.search(text[end:right])
-        if rb:
-            right = end + rb.start()
+        # The right clip applies only when another figure follows. With no later
+        # figure competing for it, a statistic word anywhere ahead can only be
+        # describing THIS one, and clipping at the first comma threw away the
+        # single case the forward reach exists for: "Compliance Review took 16
+        # days, on average" - 16 is that activity's MAX - lost "on average" to
+        # the appositive comma and passed. The left clip still stands, so a
+        # statistic belonging to an EARLIER figure cannot leak in.
+        if nxt:
+            rb = _CLAUSE_BREAK.search(text[end:right])
+            if rb:
+                right = end + rb.start()
         return text[left:right]
 
     @staticmethod
@@ -346,8 +384,35 @@ class SentinelStream:
         Titles are separated from claims by a colon, bracket or full stop, so
         breaking on those and NOT on conjunctions satisfies both cases.
         """
+        # A comparison baseline belongs to its own claim - see _CONTRAST_BREAK.
+        # The newline is a hard floor for everything below: the aggregate block is
+        # one claim per LINE, and the backward walk below happily crossed one -
+        # "Orders above $100,000: 122 ..." reached up to "Declared average
+        # order-to-cash: 12.0 days" on the line before, bound 122 to a metric
+        # whose only value is 12.0, and rejected a figure out of the very block
+        # the model is told to quote.
+        prefix = _CONTRAST_BREAK.split(prefix.rsplit("\n", 1)[-1])[-1]
         parts = _SENTENCE_BREAK.split(prefix)
         span = parts[-1] if parts else prefix
+        # Walk back over titles and parentheticals until a SPECIFIC metric is in
+        # scope. Breaking on ':' and '(' stops a process TITLE from binding every
+        # figure after it, but it also severs a metric the sentence names once and
+        # then refers to generically:
+        #
+        #   "Compliance Review (122 events): the mean cycle time is 10.43 days."
+        #
+        # after the colon only the generic "cycle time" survives, whose mean is
+        # the overall 8.5, so 10.43 - that activity's own mean - was halted.
+        # Walking back is safe in the direction that matters: bound_metrics
+        # returns every phrase it finds and _ungrounded_number accepts a figure
+        # any one of them admits, so a wider span can only ADD candidates. It
+        # cannot create a halt, only remove one. The title case it was guarding
+        # against is now held by _log_wide instead, which is the right layer for
+        # it - a case count is a fact about the log, not about the title's metric.
+        i = len(parts) - 1
+        while i > 0 and not cm.names_specific_metric(span):
+            i -= 1
+            span = f"{parts[i]} {span}"
         if tail:
             # Forward reach stops at the CLAUSE, not the sentence. The scopes are
             # deliberately asymmetric: a metric named earlier governs what
@@ -356,7 +421,15 @@ class SentinelStream:
             # 9.0, declared compliance cycle time 10.4" bind 8.5 to the
             # compliance metric two clauses away and reject the log's own
             # overall mean.
-            span = f"{span} {_CLAUSE_BREAK.split(tail)[0]}"
+            #
+            # The first NON-EMPTY clause, because an appositive puts a break
+            # immediately after the figure: in "38 of 150 cases, or 25.33%, were
+            # flagged as supply-chain bottlenecks" the clause after 25.33% is
+            # empty, so nothing bound, and the percentage rule below then
+            # rejected a rate the log computes exactly.
+            clauses = [c for c in _CLAUSE_BREAK.split(tail) if c and c.strip()]
+            if clauses:
+                span = f"{span} {clauses[0]}"
         return span
 
     @staticmethod
@@ -404,6 +477,29 @@ class SentinelStream:
         # of days. There is no discount data in the log; the honest answer is
         # that the claim is ungrounded whatever its value.
         options = list(metrics) if metrics else [metric]
+        # A '$' figure is money. Every metric in the table is measured in days or
+        # in events, so binding a dollar amount to one compares dollars against
+        # day-counts and rejects whatever it finds: "The amount for the Purchase
+        # Order in CASE-10002 is $130,960.29" - the literal amount_usd on that
+        # event - was checked against Purchase Order Created's {2.4, 4, 150} and
+        # halted. Dropping the binding costs no detection, because there is no
+        # dollar-valued metric for it to have been the wrong one OF; a fabricated
+        # total is still caught by scope, which holds the log's real money values.
+        if "$" in span:
+            options = [None]
+        # A generic alias names a DIMENSION, and a sentence with no aggregate word
+        # is not asserting an aggregate of it: "For case CASE-10001 the cycle time
+        # so far is 2 days" is a claim about one case, but "cycle time" bound it to
+        # the log's overall {8.5, 9.0, 23} and halted a figure that is a real
+        # per-event value. The generic entry exists for "the MEAN cycle time is
+        # 12.7", which carries an aggregate word and so still binds - the flagship
+        # interception is untouched.
+        # ...unless it names a statistic. "The highest cycle time was 8.5 days"
+        # carries no aggregate word, but "highest" IS the aggregate claim, and
+        # dropping the binding there let the log's MEAN pass as its maximum.
+        elif (scope == "all" and statistic is None and options
+              and all(cm.is_generic_metric(m) for m in options)):
+            options = [None]
         if "%" in span and not any(options):
             vals = self._numbers_in(span)
             if vals:
