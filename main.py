@@ -17,7 +17,6 @@ log-probabilities instead of animating a fixed string.
 import asyncio
 import json
 import os
-import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict
@@ -45,11 +44,6 @@ WINDOW = int(os.getenv("SENTINEL_WINDOW", "5"))
 MAX_NEW_TOKENS = int(os.getenv("SENTINEL_MAX_TOKENS", "120"))
 
 _state: Dict[str, Any] = {"runner": None, "retriever": None, "load_ms": None}
-# One model, one MPS context: serialise decoding so two concurrent SSE requests
-# cannot interleave forward passes on the same weights.
-# ponytail: single global lock, fine for a demo; use a worker pool per replica
-# if this ever serves real concurrent traffic.
-_decode_lock = threading.Lock()
 
 
 def _load_models() -> None:
@@ -101,35 +95,12 @@ def sse(kind: str, **fields) -> str:
     return f"data: {json.dumps({'kind': kind, **fields})}\n\n"
 
 
-async def _drain(gen):
-    """
-    Run a blocking generator on a worker thread, yielding items as they appear.
-
-    Decoding is CPU/GPU-bound and synchronous; iterating it directly inside the
-    coroutine would stall the event loop and every other request with it.
-    """
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue = asyncio.Queue()
-    SENTINEL = object()
-
-    def produce():
-        try:
-            with _decode_lock:
-                for item in gen:
-                    loop.call_soon_threadsafe(queue.put_nowait, item)
-        except Exception as err:
-            loop.call_soon_threadsafe(queue.put_nowait, err)
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, SENTINEL)
-
-    loop.run_in_executor(None, produce)
-    while True:
-        item = await queue.get()
-        if item is SENTINEL:
-            return
-        if isinstance(item, Exception):
-            raise item
-        yield item
+# Decoding used to run on a worker thread behind a global lock, drained through
+# an asyncio.Queue: the transformers runner held the weights in this process, so
+# iterating it inline stalled the event loop and two requests could interleave
+# forward passes on one MPS context. Ollama owns the model in its own process,
+# which makes generation network I/O - awaited directly, with no thread, no
+# queue and no lock, and nothing left to serialise on this side.
 
 
 # --------------------------------------------------------------------------- #
@@ -210,7 +181,7 @@ async def stream_tokens(query: str = Query(None)):
             grounded_prompt=False,
         )
         try:
-            async for ev in _drain(stream.run(q)):
+            async for ev in stream.run(q):
                 yield sse(ev.kind, text=ev.text, **ev.payload)
         except Exception as err:
             yield sse("error", message=str(err))
@@ -238,7 +209,7 @@ async def stream_unprotected(query: str = Query(None)):
         t0 = time.perf_counter()
         count = 0
         try:
-            async for step in _drain(runner.stream(prompt, max_new_tokens=MAX_NEW_TOKENS)):
+            async for step in runner.stream(prompt, max_new_tokens=MAX_NEW_TOKENS):
                 # Scored identically to the protected side, but never acted upon,
                 # so the terminal can show what would have been caught.
                 _, uncertainty, variance = engine.evaluate_token(

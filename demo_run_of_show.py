@@ -10,6 +10,7 @@ figure in the output is written into this file.
 """
 
 import argparse
+import asyncio
 import json
 import statistics
 import sys
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import celonis_metrics as cm
-from granite_runner import GraniteRunner
+from ollama_runner import OllamaRunner
 from sentinel_stream import _NUM_RE, SentinelStream
 
 REPORT_PATH = Path(__file__).parent / "data" / "demo_evidence.json"
@@ -49,10 +50,10 @@ class Ungrounded(SentinelStream):
         return {"context": None, "is_poison": False, "reason": "naive integration", "chunks": []}
 
 
-def run_panel(stream: SentinelStream, query: str) -> Dict[str, Any]:
+async def run_panel(stream: SentinelStream, query: str) -> Dict[str, Any]:
     text, unc, intercept, summary = [], [], None, None
     t0 = time.perf_counter()
-    for ev in stream.run(query):
+    async for ev in stream.run(query):
         if ev.kind == "token":
             text.append(ev.text)
             unc.append(ev.payload["uncertainty"])
@@ -81,7 +82,7 @@ def ungrounded_figures(text: str) -> List[float]:
     return out
 
 
-def main() -> int:
+async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true", help="write data/demo_evidence.json")
     args = ap.parse_args()
@@ -94,7 +95,7 @@ def main() -> int:
     print(f"Scope     : {prof['total_cases']} cases / {prof['total_events']} events")
     print(f"Declared mean compliance cycle time: {prof['declared_avg_compliance_cycle_time_days']} days")
 
-    runner = GraniteRunner.get()
+    runner = OllamaRunner()
     protected = SentinelStream(runner=runner, retriever=None, max_new_tokens=90)
     baseline = Ungrounded(runner=runner, retriever=None, max_new_tokens=90,
                           breach_run=10**9, check_numbers=False, grounded_prompt=False)
@@ -105,8 +106,8 @@ def main() -> int:
     print("UNANSWERABLE PROMPTS — the log does not contain these figures")
     print("-" * 78)
     for q in POISON:
-        base = run_panel(baseline, q)
-        prot = run_panel(protected, q)
+        base = await run_panel(baseline, q)
+        prot = await run_panel(protected, q)
         fabricated = ungrounded_figures(base["text"])
         rows.append({"query": q, "class": "unanswerable", "baseline": base, "protected": prot,
                      "baseline_fabricated_figures": fabricated})
@@ -129,7 +130,7 @@ def main() -> int:
     print("-" * 78)
     false_positives = 0
     for q in GROUNDED:
-        prot = run_panel(protected, q)
+        prot = await run_panel(protected, q)
         if prot["intercepted"]:
             false_positives += 1
         rows.append({"query": q, "class": "answerable", "protected": prot})
@@ -186,4 +187,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(asyncio.run(main()))

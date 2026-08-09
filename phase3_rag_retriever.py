@@ -29,7 +29,11 @@ if str(BASE_DIR) not in sys.path:
 from pymilvus import MilvusClient
 from sentence_transformers import SentenceTransformer, CrossEncoder
 
-DATA_PATH = BASE_DIR / "data" / "mock_celonis_data.json"
+# The 460-event export, matching what is embedded in Milvus and what
+# celonis_metrics derives its aggregates from. Defaulting to the 9-event
+# mock_celonis_data.json silently shrinks retrieval to a sixth of a percent of
+# the log while /graphs still reports 460.
+DATA_PATH = BASE_DIR / "data" / "mock_celonis_data_large.json"
 POISON_PROMPTS_PATH = BASE_DIR / "data" / "poison_prompts.json"
 MILVUS_DB_PATH = str(BASE_DIR / "data" / "sentinel_milvus.db")
 EVAL_REPORT_PATH = BASE_DIR / "data" / "phase3_evaluation_report.json"
@@ -96,19 +100,32 @@ class SentinelRAGRetriever:
             self._load_in_memory_ground_truth()
 
     def _load_in_memory_ground_truth(self):
-        """In-memory dense vector store fallback for Celonis audit logs."""
+        """
+        In-memory dense store, used only when Milvus fails to open.
+
+        Chunks are built by the ingestion pipeline's own chunk_event, not by a
+        second formatter here. The previous version wrote its own sentence
+        ("Activity: X | Cycle Time: N days | ..."), which broke the fallback two
+        ways: the wording differed from what was embedded into Milvus, so
+        similarity_threshold was comparing against a distribution nobody
+        calibrated, and it interpolated event["resource"] raw - putting real
+        actor names into the retrieval context on exactly the path that runs
+        when the vector store is unavailable. chunk_event applies the PII
+        redaction, so the fallback cannot drift from the real store or leak.
+        """
+        from phase2_ingestion_pipeline import actor_names, chunk_event
+
         self.in_memory_docs = []
-        if DATA_PATH.exists():
-            with open(DATA_PATH, "r") as f:
-                data = json.load(f)
-                for ev in data.get("events", []):
-                    text = f"Activity: {ev.get('activity')} | Cycle Time: {ev.get('cycle_time_days', 0)} days | Case: {ev.get('case_id')} | Note: {ev.get('note', '')}"
-                    self.in_memory_docs.append({
-                        "case_id": ev.get("case_id"),
-                        "activity": ev.get("activity"),
-                        "text": text,
-                        "embedding": self.encoder.encode([text], show_progress_bar=False).tolist()[0]
-                    })
+        if not DATA_PATH.exists():
+            return
+        payload = json.loads(DATA_PATH.read_text())
+        names = actor_names(payload)
+        for ev in payload.get("events", []):
+            doc = chunk_event(ev, names)
+            doc["embedding"] = self.encoder.encode(
+                [doc["text"]], show_progress_bar=False
+            ).tolist()[0]
+            self.in_memory_docs.append(doc)
 
     def retrieve(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """
