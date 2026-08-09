@@ -78,7 +78,7 @@ class Semantic_Entropy_Engine:
         self.primary_model = "granite3-dense:8b"
         self.sampler_model = "granite3-dense:2b"
 
-    def cluster_and_compute_entropy(self, continuations: List[str]) -> float:
+    async def cluster_and_compute_entropy(self, continuations: List[str]) -> float:
         """
         Uses NLI entailment to cluster K continuations and compute cluster-level Shannon Entropy.
         Paths expressing the same fact (strong bi-directional entailment/agreement) belong to the same cluster.
@@ -92,7 +92,7 @@ class Semantic_Entropy_Engine:
             placed = False
             for cluster in clusters:
                 rep_idx = cluster[0]
-                agreement = self._check_agreement(continuations[i], continuations[rep_idx])
+                agreement = await self._check_agreement(continuations[i], continuations[rep_idx])
                 if agreement:
                     cluster.append(i)
                     placed = True
@@ -107,10 +107,10 @@ class Semantic_Entropy_Engine:
 
         return se
 
-    def _check_agreement(self, text_a: str, text_b: str) -> bool:
+    async def _check_agreement(self, text_a: str, text_b: str) -> bool:
         """
         Helper using the CrossEncoder to test if text_a and text_b entail each other.
-        If CrossEncoder is not available, defaults to a word overlap threshold.
+        Wraps PyTorch inference in asyncio.to_thread to prevent blocking the asyncio event loop.
         """
         if self.cross_encoder is None:
             words_a = set(text_a.lower().split())
@@ -123,7 +123,8 @@ class Semantic_Entropy_Engine:
         try:
             import numpy as np
             pairs = [(text_a, text_b), (text_b, text_a)]
-            scores = self.cross_encoder.predict(pairs)
+            # Run PyTorch inference on worker thread via asyncio.to_thread to never block the main loop
+            scores = await asyncio.to_thread(self.cross_encoder.predict, pairs)
             if len(scores.shape) > 1 and scores.shape[1] >= 2:
                 # Calculate softmax probabilities across [contradiction, entailment, neutral]
                 exp_scores = np.exp(scores - np.max(scores, axis=-1, keepdims=True))
@@ -139,6 +140,7 @@ class Semantic_Entropy_Engine:
                 return float(scores[0]) > 0.0 and float(scores[1]) > 0.0
         except Exception:
             return len(set(text_a.lower().split()) & set(text_b.lower().split())) >= 2
+
 
 
 

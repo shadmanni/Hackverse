@@ -214,17 +214,19 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
                                         yield f"data: {json.dumps(breach_payload)}\n\n"
                                         return
 
-                                    # Trigger non-blocking background task at clause boundaries (or every 15 tokens) if no task is currently running
-                                    is_boundary = (token_counter % 15 == 0) or any(p in delta_content for p in {".", ";", "\n", "?"})
+                                    # Evaluation Stride & Debouncing: Evaluate ONLY every 10 tokens or on sentence punctuation ('.', '?', '!', ';')
+                                    is_boundary = (token_counter % 10 == 0) or any(p in delta_content for p in {".", "?", "!", ";"})
                                     if is_boundary and active_eval_task is None:
                                         current_prefix = "".join(context_history)
                                         
+                                        # Fire-and-Forget / Unawaited Background Task
                                         async def _background_eval(prefix_str: str):
                                             paths = await semantic_entropy_engine.generate_k_paths(prefix_str, K=3, max_tokens=10)
-                                            raw_se = semantic_entropy_engine.cluster_and_compute_entropy(paths)
+                                            raw_se = await semantic_entropy_engine.cluster_and_compute_entropy(paths)
                                             return firewall.update(raw_se)
 
                                         active_eval_task = asyncio.create_task(_background_eval(current_prefix))
+
                             except Exception:
                                 pass
 
