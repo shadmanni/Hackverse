@@ -12,6 +12,7 @@ UI or the API may hardcode a metric that this module can compute.
 """
 
 import json
+import re
 import statistics
 from functools import lru_cache
 from pathlib import Path
@@ -59,15 +60,18 @@ def process_profile(path: str = str(DATA_PATH)) -> Dict[str, Any]:
         vals = blob.pop("values")
         blob["mean_cycle_days"] = round(statistics.mean(vals), 2)
         blob["max_cycle_days"] = max(vals)
-        # No per-activity minimum, deliberately. Exposing one would let a range
-        # bind both endpoints ("Compliance Review cycle times range from 4 to 16
-        # days" currently halts on 4), but metric_aliases is the UNION of a
-        # metric's statistics, so it also makes every activity's smallest cycle
-        # time admissible as any unqualified figure for that activity. Measured:
-        # Invoice Approved's minimum is 3, which made "3 events are recorded for
-        # the Invoice Approved activity" - a fabrication caught live on a
-        # green-path demo prompt, real count 150 - pass again. A hand-authored
-        # range is worth less than a detection observed in model output.
+        # The minimum was withheld until the unit rule existed. Exposing it is
+        # what lets a range bind both endpoints ("Compliance Review cycle times
+        # range from 4 to 16 days" used to halt on 4), but on its own it also
+        # made every activity's smallest cycle time admissible as ANY unqualified
+        # figure for that activity, because metric_aliases is the union of a
+        # metric's statistics. Measured then: Invoice Approved's minimum is 3,
+        # which let "3 events are recorded for the Invoice Approved activity" -
+        # a fabrication caught live on a green-path prompt, real count 150 - pass
+        # again. figure_unit closes that hole from the other side: "3 events" is
+        # a COUNT claim, so only count-valued statistics are admissible and a
+        # duration can no longer stand in for one. See _STATISTIC_UNIT.
+        blob["min_cycle_days"] = min(vals)
         blob["event_count"] = len(vals)
 
     # The declared block wins where it exists: it is the stated ground truth.
@@ -185,7 +189,7 @@ def metric_statistics(path: str = str(DATA_PATH)) -> Dict[str, Dict[str, frozens
     def activity(name: str) -> Dict[str, Any]:
         a = act.get(name, {})
         return {"mean": a.get("mean_cycle_days"), "max": a.get("max_cycle_days"),
-                "count": a.get("event_count")}
+                "min": a.get("min_cycle_days"), "count": a.get("event_count")}
 
     add("cycle time", mean=p["mean_cycle_days"], median=p["median_cycle_days"],
         max=p["max_cycle_days"])
@@ -225,15 +229,21 @@ def metric_statistics(path: str = str(DATA_PATH)) -> Dict[str, Dict[str, frozens
         mean=p["high_value_mean_cycle_days"], threshold=HIGH_VALUE_USD)
     add("high value orders", count=p["high_value_orders"],
         mean=p["high_value_mean_cycle_days"], threshold=HIGH_VALUE_USD)
-    # Deliberately NOT aliased by its defining criterion. Adding "$100,000" as a
-    # phrase for this metric would let "The 122 orders in excess of $100,000
-    # have a mean cycle time of 9.11 days" bind - a true sentence that currently
-    # halts - but the same alias then binds "There were 393 orders above
-    # $100,000", where 393 is the EVENT count and the sentence says orders. That
-    # claim must stay `unverifiable`, not become `verified` or `contradicted`:
-    # the criterion alone does not say which population is being counted, and
-    # guessing is the overclaim audit_figures exists to prevent. The "in excess
-    # of" phrasing stays a known gap; see test_grounding_regression.
+    # Aliased by its defining criterion, which was held back until the unit rule
+    # landed. "$100,000" names this metric and nothing else in the log, so
+    # "The 122 orders in excess of $100,000 have a mean cycle time of 9.11 days"
+    # - true in every figure - now binds instead of being checked against the
+    # generic whole-log cycle time and halted on all three.
+    #
+    # The objection to adding it was "There were 393 orders above $100,000",
+    # where 393 is the EVENT count and the sentence says orders: with only a
+    # criterion to go on, the alias could not say which population was meant, so
+    # binding it was guessing. figure_unit answers that: "orders" is a count, so
+    # the claim is checked against count-valued statistics only, and the count
+    # of that population is a thing the log actually knows.
+    for phrase in ("$100,000", "100,000"):
+        add(phrase, count=p["high_value_orders"],
+            mean=p["high_value_mean_cycle_days"], threshold=HIGH_VALUE_USD)
     return out
 
 
@@ -271,12 +281,82 @@ _STATISTIC_WORDS: Dict[str, Tuple[str, ...]] = {
     # "'Compliance Review' occurs 16 times" asserts a count, and 16 is that
     # activity's max. "events" was tried and rejected - it appears in almost
     # every statistic span in this domain, so it bound counts to means.
-    "count": ("number of", "how many", "count of", "total of", "count", "times"),
+    # "times" was here and has moved to _UNIT_WORDS. As a statistic word it was
+    # matched anywhere in the span, so "cycle times" - a plural DURATION - bound
+    # the count statistic, and "Compliance Review cycle times range from 4 to 16
+    # days" checked 4 against that activity's event count of 122. As a unit word
+    # it only matches directly after a figure, where "occurs 16 times" still
+    # reads as a count and "cycle times range from" no longer does.
+    "count": ("number of", "how many", "count of", "total of", "count"),
     "rate": ("percentage", "percent", "proportion", "share of", "rate of"),
 }
 
+# Matched on WORD boundaries. Substring matching put "count" inside "accounts",
+# so "Compliance Review accounts for 122 of the 460 events in the log" bound the
+# count statistic to 460 - the log's total event count, stated correctly - and
+# halted on it, because that activity's own count is 122. The same class of bug
+# had already been fixed once in _QUALIFIER_BEFORE, where "over" matched inside
+# "cover"; "discount" against "count" is the next one waiting in this domain.
+_STATISTIC_PATTERNS: Dict[str, "re.Pattern"] = {
+    stat: re.compile(r"\b(?:" + "|".join(re.escape(w) for w in words) + r")\b",
+                     re.IGNORECASE)
+    for stat, words in _STATISTIC_WORDS.items()
+}
 
-def bound_statistic(text: str, window: int = 200) -> Optional[str]:
+# What KIND of quantity each statistic produces. Two statistics of the same
+# metric can hold the same number while meaning different things - Compliance
+# Review has a max of 16 days and a count of 122 events - so a set that has
+# forgotten which was which accepts "16 events" by quoting the max.
+_STATISTIC_UNIT: Dict[str, str] = {
+    "mean": "duration", "median": "duration", "max": "duration",
+    "min": "duration", "count": "count", "rate": "rate", "threshold": "money",
+}
+
+# The noun that follows a figure names the unit it is measured in. This is a
+# deliberately LOCAL signal - it reads only the few characters after the digits,
+# unlike the statistic words, which are searched across the whole clause. That
+# is why "events" works here and was rejected there: in a span search it appears
+# in almost every sentence in this domain, but directly after a figure it is
+# unambiguous.
+_UNIT_WORDS: Dict[str, Tuple[str, ...]] = {
+    "duration": ("days", "day", "hours", "hour", "hrs", "weeks", "week",
+                 "months", "month", "minutes", "business days"),
+    "count": ("cases", "case", "orders", "order", "events", "event", "times",
+              "records", "record", "invoices", "invoice", "activities",
+              "instances", "occurrences", "steps"),
+}
+_UNIT_AFTER = re.compile(
+    r"^\s*(?:%\s*)?(" + "|".join(
+        re.escape(w) for ws in _UNIT_WORDS.values() for w in sorted(ws, key=len, reverse=True)
+    ) + r")\b",
+    re.IGNORECASE,
+)
+_UNIT_OF = {w: unit for unit, ws in _UNIT_WORDS.items() for w in ws}
+
+
+def figure_unit(figure: str, tail: str) -> Optional[str]:
+    """
+    The unit a figure is stated in: 'rate', 'money', 'duration', 'count', or
+    None when the sentence does not say.
+
+    `figure` is the matched numeral (which carries its own '%' or '$'), `tail`
+    the text immediately after it. Only the unit NOUN is read, not the wider
+    sentence - see _UNIT_WORDS for why the scope has to stay this tight.
+    """
+    if "%" in figure:
+        return "rate"
+    if "$" in figure:
+        return "money"
+    m = _UNIT_AFTER.match(tail or "")
+    if m:
+        return _UNIT_OF[m.group(1).lower()]
+    # "38 percent of orders" - the unit is spelled rather than punctuated.
+    if re.match(r"^\s*per\s?cent", tail or "", re.IGNORECASE):
+        return "rate"
+    return None
+
+
+def bound_statistic(text: str, window: int = 200, unit: Optional[str] = None) -> Optional[str]:
     """
     Which statistic a claim names, if exactly one is unambiguous.
 
@@ -284,9 +364,18 @@ def bound_statistic(text: str, window: int = 200) -> Optional[str]:
     maximum both..."), because an ambiguous binding would be enforced as if it
     were certain. None restores the pre-existing whole-metric check, so the
     fallback is never stricter than what shipped before.
+
+    `unit` discards statistic words that cannot describe a figure of that kind
+    before the ambiguity test is applied - a count is never a mean. That both
+    resolves sentences carrying one statistic word per unit ("the mean cycle
+    time ... across 122 events" names `mean`, but not for 122) and lets the
+    caller search a wider span than the figure's own clause, since the words it
+    might wrongly pick up out there are largely ones this filter removes.
     """
     recent = text[-window:].lower()
-    hits = {s for s, words in _STATISTIC_WORDS.items() if any(w in recent for w in words)}
+    hits = {s for s, pat in _STATISTIC_PATTERNS.items() if pat.search(recent)}
+    if unit:
+        hits = {s for s in hits if _STATISTIC_UNIT.get(s) == unit}
     return hits.pop() if len(hits) == 1 else None
 
 
@@ -447,6 +536,7 @@ def is_grounded_number(
     scope: str = "all",
     metric: Optional[str] = None,
     statistic: Optional[str] = None,
+    unit: Optional[str] = None,
 ) -> bool:
     """
     True when `value` matches a number the event log can produce, within 2%.
@@ -468,16 +558,31 @@ def is_grounded_number(
     metric, and is still a lie because it is the wrong statistic of it:
     "Compliance Review took 16 days on average" quotes that activity's MAX.
 
-    The narrowing applies only when both a metric and a statistic are bound and
-    that metric actually carries that statistic. Any other combination falls
-    back to the wider check, so this can reject claims the old code accepted but
-    never accepts fewer - no threshold moved, and nothing that passed before on
-    a correctly-stated figure passes differently now.
+    Pass unit=<figure_unit(...)> when the sentence says what the figure is
+    MEASURED IN. A statistic word is often absent, and then the union of a
+    metric's statistics is the admissible set - which is how "Compliance Review
+    has 16 events" passed by matching that activity's max of 16 days. The unit
+    is the weaker but far more available signal: it never says which statistic
+    is meant, but it does say which ones are impossible, and dropping the
+    duration-valued statistics for a claim counted in events is enough. Where
+    both are bound the statistic wins, being the more precise of the two.
+
+    The narrowing applies only when a metric is bound and it actually carries a
+    statistic of the named kind. Any other combination falls back to the wider
+    check, so this can reject claims the old code accepted but never accepts
+    fewer - no threshold moved, and nothing that passed before on a correctly
+    stated figure passes differently now.
     """
     target = round(float(value), 2)
     by_stat = metric_statistics(path).get(metric) if metric else None
+    same_unit = ({s: v for s, v in by_stat.items() if _STATISTIC_UNIT.get(s) == unit}
+                 if by_stat and unit else {})
     if by_stat and statistic and statistic in by_stat:
         candidates = by_stat[statistic]
+    elif same_unit:
+        # _log_wide still applies: the log's own case and event counts are
+        # admissible for a count claim whatever metric the sentence names.
+        candidates = frozenset().union(*same_unit.values()) | _log_wide(path, statistic)
     elif metric and metric in metric_aliases(path):
         candidates = metric_aliases(path)[metric] | _log_wide(path, statistic)
     else:
@@ -535,4 +640,20 @@ if __name__ == "__main__":
     assert is_grounded_number(p["declared_avg_compliance_cycle_time_days"])
     assert is_grounded_number(p["mean_cycle_days"])
     assert not is_grounded_number(42.8), "fabricated demo figure should not be groundable"
-    print("\nself-check OK: 4.2 and 42.8 ungroundable; declared + derived metrics groundable")
+
+    # The unit rule. Compliance Review's max is 16 DAYS and its count is 122
+    # EVENTS; without a unit both numbers are admissible for either claim.
+    assert figure_unit("16", " events in the log") == "count"
+    assert figure_unit("16", " days on average") == "duration"
+    assert figure_unit("38%", " of orders") == "rate"
+    assert figure_unit("$100,000", "") == "money"
+    assert figure_unit("16", " and rising") is None
+    assert is_grounded_number(16, metric="compliance review", unit="duration")
+    assert not is_grounded_number(16, metric="compliance review", unit="count"), \
+        "a count claim must not be satisfied by that metric's maximum in days"
+    assert is_grounded_number(122, metric="compliance review", unit="count")
+    # Word boundaries: "count" must not match inside "accounts".
+    assert bound_statistic("Compliance Review accounts for 460 events") is None
+
+    print("\nself-check OK: 4.2 and 42.8 ungroundable; declared + derived metrics "
+          "groundable; unit narrowing separates 16 days from 16 events")

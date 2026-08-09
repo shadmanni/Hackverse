@@ -161,11 +161,20 @@ _SENTENCE_BREAK = re.compile(r"(?<!\d)[.](?!\d)|[;:()\[\]\n]")
 # \b is load-bearing: without it "over" matched inside "cover", so
 # "Bottleneck flags cover 25.33% of cases" lost its metric binding entirely and
 # the percentage rule below then rejected it as underivable.
+#
+# "at least"/"at most" sit in a branch of their own because they are the one
+# pair that is BOTH a qualifier and a statistic word. Before a money amount they
+# select a population ("orders of at least $100,000"); before a bare figure they
+# assert an extremum ("Compliance Review takes at most 10.43 days" claims that
+# activity's maximum, which is 16 - the mean quoted as the worst case). Blanket
+# suppression cost the binding in the second reading, so the claim reached no
+# metric at all and a wrong-statistic lie passed as merely unverifiable.
+# Requiring the '$' keeps the population reading and returns the other.
 _QUALIFIER_BEFORE = re.compile(
     r"\b(?:\d[\d,.]*\s+of"
     r"|above|below|over|under|exceeding|in excess of"
-    r"|more than|less than|at least|at most)"
-    r"\s+\$?$",
+    r"|more than|less than)\s+\$?$"
+    r"|\b(?:at least|at most)\s+\$$",
     re.IGNORECASE,
 )
 
@@ -379,6 +388,32 @@ class SentinelStream:
                 right = end + rb.start()
         return text[left:right]
 
+    @classmethod
+    def _bound_statistic(cls, text: str, start: int, end: int,
+                         unit: Optional[str], metric_span: str) -> Optional[str]:
+        """
+        The statistic for the figure at [start, end): its own clause first, then
+        its sentence.
+
+        The clause bound is right for the common shapes and wrong for one:
+
+            "The average Compliance Review duration across 122 cases was 16 days"
+
+        `average` is separated from the 16 it describes by both an intervening
+        figure and a clause break, so the clause span sees none of it, 16 passed
+        as that activity's max, and the sentence asserting a mean of 10.43 went
+        out unchallenged. Widening unconditionally is what the clause bound
+        exists to prevent - one statistic word would capture every figure after
+        it. The unit is what makes the second look safe: it only fires when the
+        figure states what it is measured in, and a statistic of the wrong kind
+        for that unit is discarded before it can bind.
+        """
+        span = cls._statistic_span(text, start, end)
+        near = cm.bound_statistic(span, unit=unit)
+        if near or not unit:
+            return near
+        return cm.bound_statistic(metric_span, unit=unit)
+
     @staticmethod
     def _metric_span(prefix: str, tail: str = "") -> str:
         """
@@ -503,6 +538,7 @@ class SentinelStream:
     def _ungrounded_number(
         self, span: str, scope: str = "all", metric: Optional[str] = None,
         statistic: Optional[str] = None, metrics: Optional[List[str]] = None,
+        unit: Optional[str] = None, sentence_complete: bool = True,
     ) -> Optional[float]:
         """First number in `span` that the event log cannot produce."""
         # A percentage that names no metric we know cannot be grounded at all.
@@ -536,7 +572,16 @@ class SentinelStream:
         elif (scope == "all" and statistic is None and options
               and all(cm.is_generic_metric(m) for m in options)):
             options = [None]
-        if "%" in span and not any(options):
+        # ...but only once the sentence is finished. This rule concludes from the
+        # ABSENCE of a metric, and mid-decode absence is not evidence - the word
+        # may still be coming. Measured live on "What percentage of orders were
+        # flagged as bottlenecks?": the model emitted "38 out of 150 orders, which
+        # is 25.3%," and the guard fired on 25.3 - the log's own rate, 25.33 -
+        # because "bottlenecks" was still three tokens away. The stream halted and
+        # the recovery then returned the identical sentence, so the system
+        # contradicted itself on screen. The end-of-stream rescan sees the whole
+        # sentence and binds it correctly; this defers to it.
+        if "%" in span and not any(options) and sentence_complete:
             vals = self._numbers_in(span)
             if vals:
                 return vals[0]
@@ -546,7 +591,8 @@ class SentinelStream:
         # cm.bound_metrics for why neither longest-wins nor nearest-wins works.
         for val in self._numbers_in(span):
             if not any(
-                cm.is_grounded_number(val, scope=scope, metric=m, statistic=statistic)
+                cm.is_grounded_number(val, scope=scope, metric=m, statistic=statistic,
+                                      unit=unit)
                 for m in options
             ):
                 return val
@@ -573,6 +619,12 @@ class SentinelStream:
                 break                      # still being emitted; check it later
             scanned_to = m.end()
             prefix = text[:m.end()]
+            mspan = self._metric_span(prefix, tail)
+            # The unit is the weaker signal that is almost always present where
+            # the statistic word is not: "Compliance Review has 16 events" names
+            # no statistic, but "events" rules out every duration-valued one, and
+            # 16 is that activity's max in days.
+            unit = cm.figure_unit(m.group(), tail)
             val = self._ungrounded_number(
                 m.group(),
                 scope=self._claim_scope(prefix, figure=m.group()),
@@ -581,10 +633,14 @@ class SentinelStream:
                 # figure is a threshold or a denominator, which qualify the
                 # metric rather than state it.
                 metrics=[] if _QUALIFIER_BEFORE.search(text[:m.start()])
-                else cm.bound_metrics(self._metric_span(prefix, tail)),
+                else cm.bound_metrics(mspan),
                 # And if it names the statistic too, it must be that statistic's
                 # value - "16 days on average" quotes Compliance Review's max.
-                statistic=cm.bound_statistic(self._statistic_span(text, m.start(), m.end())),
+                statistic=self._bound_statistic(text, m.start(), m.end(), unit, mspan),
+                unit=unit,
+                # complete_only IS the mid-decode pass, so a rule that concludes
+                # from an absent metric must wait for the end-of-stream rescan.
+                sentence_complete=not complete_only,
             )
             if val is not None:
                 return val, scanned_to
@@ -619,14 +675,16 @@ class SentinelStream:
         for m in _NUM_RE.finditer(text):
             figure = m.group()
             prefix = text[:m.end()]
+            mspan = self._metric_span(prefix, text[m.end():])
             metrics = ([] if _QUALIFIER_BEFORE.search(text[:m.start()])
-                       else cm.bound_metrics(self._metric_span(prefix, text[m.end():])))
+                       else cm.bound_metrics(mspan))
             # Head of the list for reporting; the whole list decides the verdict.
             metric = metrics[0] if metrics else None
-            statistic = cm.bound_statistic(self._statistic_span(text, m.start(), m.end()))
+            unit = cm.figure_unit(figure, text[m.end():])
+            statistic = self._bound_statistic(text, m.start(), m.end(), unit, mspan)
             scope = self._claim_scope(prefix, figure=figure)
             contradicted = self._ungrounded_number(
-                figure, scope=scope, metrics=metrics, statistic=statistic
+                figure, scope=scope, metrics=metrics, statistic=statistic, unit=unit
             ) is not None
             if contradicted:
                 state = "contradicted"
@@ -636,7 +694,7 @@ class SentinelStream:
                 state = "unverifiable"
             counts[state] += 1
             detail.append({"figure": figure, "state": state, "metric": metric,
-                           "statistic": statistic, "scope": scope})
+                           "statistic": statistic, "unit": unit, "scope": scope})
         return {**counts, "figures": detail}
 
     # ---------- interception ----------
