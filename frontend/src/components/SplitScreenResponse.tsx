@@ -39,6 +39,8 @@ interface StreamEvent {
     admissible: number[];
   } | null;
   tokens_before_halt?: number;
+  /** decode budget the run was given; what tokens_before_halt is a fraction of */
+  token_budget?: number;
   semantic_entropy?: number;
   figure_at_stake?: boolean;
   /** the decoder's top-k where the figure was chosen, clustered by value */
@@ -330,6 +332,7 @@ export default function SplitScreenResponse({ query, graphName, onDone, tau: tau
   const leftTokens = left.summary?.tokens ?? left.uncertainty.length;
   const rightTokens = right.intercept?.tokens_before_halt ?? right.summary?.tokens ?? right.uncertainty.length;
   const halted = right.intercept !== null;
+  const budget = right.intercept?.token_budget ?? right.summary?.token_budget ?? null;
   // There is deliberately no "tokens saved" figure here any more. It was
   // leftTokens - rightTokens, clamped at zero: two independent generations that
   // each stop at their own natural length, so the difference measures nothing.
@@ -633,14 +636,39 @@ export default function SplitScreenResponse({ query, graphName, onDone, tau: tau
 
           <div className="mt-4 border-t border-slate-800/80 pt-3">
             <EntropyChart series={right.uncertainty} semantic={right.semantic} tau={tau} />
-            <div className="grid grid-cols-3 gap-2 mt-3">
+            {/* "DECODE HALTED: not halted" restated what the panel already
+                shows. The figure a viewer cannot see is how much decoding the
+                halt actually prevented, so that is what these report.
+
+                Measured against the DECODE BUDGET, never against the left
+                panel. The two panels are independent generations that stop at
+                their own natural lengths, so subtracting them measures nothing
+                about interception and goes negative whenever the unprotected
+                run finishes first. "11 of 90 permitted, 79 never decoded" is
+                the same framing demo_run_of_show reports and is true by
+                construction. */}
+            <div className="grid grid-cols-4 gap-2 mt-3">
               <Stat
-                label="DECODE HALTED"
-                value={halted ? `token ${rightTokens}` : right.done ? "not halted" : "…"}
+                label="TOKENS EMITTED"
+                value={budget ? `${rightTokens} / ${budget}` : String(rightTokens)}
                 tone="text-emerald-400"
               />
               <Stat
-                label="TIME TO HALT"
+                label="DECODE PREVENTED"
+                value={
+                  halted && budget
+                    ? `${Math.max(budget - rightTokens, 0)} tok`
+                    : right.done
+                      ? "ran to end"
+                      : "…"
+                }
+                tone="text-emerald-300"
+              />
+              <Stat
+                // The label was fixed at "TIME TO HALT" and fell back to total
+                // elapsed when nothing halted, so a completed stream reported
+                // its own decode time as the time it took to halt.
+                label={halted ? "TIME TO HALT" : "DECODE TIME"}
                 value={fmtMs(right.intercept?.elapsed_ms ?? right.summary?.elapsed_ms)}
                 tone="text-emerald-300"
               />

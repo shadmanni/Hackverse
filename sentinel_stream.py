@@ -806,6 +806,7 @@ class SentinelStream:
                 # with no contradiction at all.
                 "refutation": self._refutation("".join(history) + tok),
                 "tokens_before_halt": emitted,
+                "token_budget": self.max_new_tokens,
                 "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
                 "entropy_overhead_ms": round(overhead_s * 1000, 3),
                 "partial_output": "".join(history),
@@ -1030,6 +1031,15 @@ class SentinelStream:
             text="".join(history),
             payload={
                 "tokens": emitted,
+                # The decode budget this run was given. "Halted at token 11" is
+                # only meaningful against the number it was allowed to reach -
+                # 11 of 90 says 79 tokens were never decoded, which is the one
+                # rigorous statement available about what interception saved.
+                # The difference against the unprotected panel is NOT that
+                # statement: the two are independent generations that stop at
+                # their own natural lengths, and that subtraction goes negative
+                # whenever the baseline finishes first.
+                "token_budget": self.max_new_tokens,
                 "elapsed_ms": round(total_ms, 2),
                 "entropy_overhead_ms": round(overhead_s * 1000, 3),
                 "overhead_pct": round(overhead_s * 1000 / total_ms * 100, 4) if total_ms else 0.0,
