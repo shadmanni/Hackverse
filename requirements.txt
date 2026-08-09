@@ -16,6 +16,18 @@ torch>=2.2.0
 transformers>=4.40.0
 huggingface_hub>=0.23.0
 
+# IBM Data Prep Kit — PII redaction via DPK's Presidio stack.
+# dpk_pii_engine.py mirrors the internals of dpk_pii_redactor's
+# PIIRedactorTransform (pii_analyzer.py + pii_anonymizer.py).
+# The full DPK file-pipeline package (data-prep-toolkit-transforms) is
+# available separately on Python 3.11:
+#   pip install data-prep-toolkit data-prep-toolkit-transforms
+# For this venv (Python 3.14) we use the Presidio libraries directly:
+presidio-analyzer>=2.2.0
+presidio-anonymizer>=2.2.0
+spacy>=3.4.0
+# After installing spacy, run once: python -m spacy download en_core_web_sm
+
 # Tests
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
