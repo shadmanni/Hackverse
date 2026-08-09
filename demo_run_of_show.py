@@ -20,7 +20,7 @@ from typing import Any, Dict, List
 
 import celonis_metrics as cm
 from ollama_runner import OllamaRunner
-from sentinel_stream import _NUM_RE, SentinelStream
+from sentinel_stream import SentinelStream
 
 REPORT_PATH = Path(__file__).parent / "data" / "demo_evidence.json"
 MAX_NEW_TOKENS = 90
@@ -72,15 +72,25 @@ async def run_panel(stream: SentinelStream, query: str) -> Dict[str, Any]:
     }
 
 
-def ungrounded_figures(text: str) -> List[float]:
-    """Figures in `text` the event log cannot produce, scoped by claim type."""
-    out = []
-    for m in _NUM_RE.finditer(text):
-        scope = SentinelStream._claim_scope(text[: m.end()], figure=m.group())
-        for v in SentinelStream._numbers_in(m.group()):
-            if not cm.is_grounded_number(v, scope=scope):
-                out.append(v)
-    return out
+def ungrounded_figures(sentinel: SentinelStream, text: str) -> List[str]:
+    """
+    Figures in `text` the event log contradicts.
+
+    Runs the SAME check the firewall runs, applied after the fact to the
+    baseline's finished text. That is the only honest form of this column: the
+    two panels differ in WHEN the check happens, not in what it is.
+
+    It used to call is_grounded_number with a scope and nothing else - no metric,
+    no statistic, no unit - which is the bare set-membership test the rest of
+    this codebase exists to demonstrate is not sufficient. It scored the
+    baseline's flagship fabrication, "The mean compliance cycle time is 12.5
+    days", as clean, because 12.5 lands within 2% of 12.47, the SUPPLY CHAIN
+    BOTTLENECK mean. The evidence file for the pitch was therefore crediting the
+    naive integration with two fabrications it did not catch, on the exact
+    sentence the demo is built around.
+    """
+    return [f["figure"] for f in sentinel.audit_figures(text)["figures"]
+            if f["state"] == "contradicted"]
 
 
 async def main() -> int:
@@ -109,7 +119,7 @@ async def main() -> int:
     for q in POISON:
         base = await run_panel(baseline, q)
         prot = await run_panel(protected, q)
-        fabricated = ungrounded_figures(base["text"])
+        fabricated = ungrounded_figures(protected, base["text"])
         rows.append({"query": q, "class": "unanswerable", "baseline": base, "protected": prot,
                      "baseline_fabricated_figures": fabricated})
         print(f"\nQ: {q}")
@@ -154,7 +164,7 @@ async def main() -> int:
     held = stopped + sum(
         1 for r in unanswerable
         if not r["protected"]["intercepted"]
-        and not ungrounded_figures(r["protected"]["text"])
+        and not ungrounded_figures(protected, r["protected"]["text"])
     )
 
     overheads = [

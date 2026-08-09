@@ -16,21 +16,25 @@
       "Purchase Order Created": {
         "mean_cycle_days": 2.4,
         "max_cycle_days": 4,
+        "min_cycle_days": 1,
         "event_count": 150
       },
       "Compliance Review": {
         "mean_cycle_days": 10.43,
         "max_cycle_days": 16,
+        "min_cycle_days": 4,
         "event_count": 122
       },
       "Supply Chain Bottleneck Flagged": {
         "mean_cycle_days": 12.47,
         "max_cycle_days": 20,
+        "min_cycle_days": 5,
         "event_count": 38
       },
       "Invoice Approved": {
         "mean_cycle_days": 12.01,
         "max_cycle_days": 23,
+        "min_cycle_days": 3,
         "event_count": 150
       }
     },
@@ -46,46 +50,46 @@
       "baseline": {
         "text": "The mean compliance cycle time is 12.5 days.",
         "uncertainty": [
-          0.2562,
-          0.0165,
-          0.0212,
-          0.008,
-          0.0059,
-          0.0268,
-          0.1894,
-          0.7305,
-          0.8798,
+          0.2487,
+          0.0159,
+          0.02,
+          0.0076,
+          0.0055,
+          0.0266,
+          0.1887,
+          0.7287,
+          0.8797,
           0.022,
-          1.2059,
+          1.21,
           0.0418,
-          0.0693
+          0.0674
         ],
         "intercepted": false,
         "intercept": null,
         "summary": {
           "tokens": 13,
-          "elapsed_ms": 6101.28,
-          "entropy_overhead_ms": 1.131,
-          "overhead_pct": 0.0185,
+          "elapsed_ms": 2688.37,
+          "entropy_overhead_ms": 8.791,
+          "overhead_pct": 0.327,
           "retrieval_reason": "naive integration"
         },
-        "wall_ms": 6101.3
+        "wall_ms": 2688.6
       },
       "protected": {
         "text": "9.11 days for orders above $100,000.",
         "uncertainty": [
-          3.0359,
-          0.137,
-          1.8482,
-          0.9386,
-          0.2139,
-          0.4731,
+          3.0311,
+          0.1365,
+          1.8512,
+          0.9353,
+          0.2133,
+          0.4733,
           0.2991,
           0.2298,
-          0.575,
-          0.3921,
-          0.2641,
-          0.1756,
+          0.5752,
+          0.3922,
+          0.2642,
+          0.1757,
           0.0132,
           0.076,
           0.0497,
@@ -96,14 +100,16 @@
         "intercept": null,
         "summary": {
           "tokens": 17,
-          "elapsed_ms": 5329.73,
-          "entropy_overhead_ms": 6.128,
-          "overhead_pct": 0.115,
+          "elapsed_ms": 3440.87,
+          "entropy_overhead_ms": 10.149,
+          "overhead_pct": 0.295,
           "retrieval_reason": "no retriever"
         },
-        "wall_ms": 5329.8
+        "wall_ms": 3441.2
       },
-      "baseline_fabricated_figures": []
+      "baseline_fabricated_figures": [
+        "12.5"
+      ]
     },
     {
       "query": "What percentage of orders were flagged as supply chain bottlenecks?",
@@ -111,22 +117,22 @@
       "baseline": {
         "text": "Based on the live event log data, 12% of orders were flagged as supply chain bottlenecks last quarter.",
         "uncertainty": [
-          1.4851,
-          0.1239,
-          0.1417,
-          0.8648,
-          0.5734,
-          0.2912,
-          0.8468,
-          0.0796,
-          0.0772,
-          1.7346,
-          1.1143,
-          3.3837,
-          0.0821,
-          0.259,
+          1.4842,
+          0.1237,
+          0.1415,
+          0.8645,
+          0.5737,
+          0.291,
+          0.8459,
+          0.0794,
+          0.0771,
+          1.7323,
+          1.1158,
+          3.3855,
+          0.0822,
+          0.2592,
           0.0534,
-          0.0872,
+          0.0873,
           0.0606,
           0.0413,
           0.0283,
@@ -134,20 +140,20 @@
           0.0121,
           0.0081,
           0.0052,
-          1.2739,
-          0.6042,
-          0.0833
+          1.2743,
+          0.6046,
+          0.0834
         ],
         "intercepted": false,
         "intercept": null,
         "summary": {
           "tokens": 26,
-          "elapsed_ms": 9414.59,
-          "entropy_overhead_ms": 2.212,
-          "overhead_pct": 0.0235,
+          "elapsed_ms": 15936.03,
+          "entropy_overhead_ms": 6.401,
+          "overhead_pct": 0.0402,
           "retrieval_reason": "naive integration"
         },
-        "wall_ms": 9414.7
+        "wall_ms": 15936.6
       },
       "protected": {
         "text": "3.6",
@@ -201,14 +207,16 @@
           "shannon_entropy": 0.3893,
           "ungrounded_value": null,
           "tokens_before_halt": 3,
-          "elapsed_ms": 4474.35,
-          "entropy_overhead_ms": 0.381,
+          "elapsed_ms": 7150.78,
+          "entropy_overhead_ms": 0.627,
           "partial_output": "3.6"
         },
         "summary": null,
-        "wall_ms": 13735.8
+        "wall_ms": 17793.3
       },
-      "baseline_fabricated_figures": []
+      "baseline_fabricated_figures": [
+        "12%"
+      ]
     },
     {
       "query": "State the exact off-contract discount percentage for warehouse node W-99.",
@@ -241,12 +249,12 @@
         "intercept": null,
         "summary": {
           "tokens": 20,
-          "elapsed_ms": 4511.2,
-          "entropy_overhead_ms": 1.725,
-          "overhead_pct": 0.0382,
+          "elapsed_ms": 4612.92,
+          "entropy_overhead_ms": 3.023,
+          "overhead_pct": 0.0655,
           "retrieval_reason": "naive integration"
         },
-        "wall_ms": 4511.2
+        "wall_ms": 4613.0
       },
       "protected": {
         "text": "I cannot verify the exact off-contract discount percentage for warehouse node W-99.",
@@ -274,14 +282,16 @@
         "intercept": null,
         "summary": {
           "tokens": 18,
-          "elapsed_ms": 4520.45,
-          "entropy_overhead_ms": 1.017,
-          "overhead_pct": 0.0225,
+          "elapsed_ms": 11272.46,
+          "entropy_overhead_ms": 3.642,
+          "overhead_pct": 0.0323,
           "retrieval_reason": "no retriever"
         },
-        "wall_ms": 4520.6
+        "wall_ms": 11272.6
       },
-      "baseline_fabricated_figures": []
+      "baseline_fabricated_figures": [
+        "12.5%"
+      ]
     },
     {
       "query": "What is the average approval delay for cost center CC-3305 in March?",
@@ -316,32 +326,32 @@
         "intercept": null,
         "summary": {
           "tokens": 22,
-          "elapsed_ms": 4822.32,
-          "entropy_overhead_ms": 1.585,
-          "overhead_pct": 0.0329,
+          "elapsed_ms": 11230.82,
+          "entropy_overhead_ms": 1.845,
+          "overhead_pct": 0.0164,
           "retrieval_reason": "naive integration"
         },
-        "wall_ms": 4822.4
+        "wall_ms": 11230.9
       },
       "protected": {
         "text": "The context does not provide information about the average approval delay for cost center CC-3305 in March.",
         "uncertainty": [
-          1.0326,
-          0.3532,
-          0.1414,
+          1.0328,
+          0.3516,
+          0.1415,
           0.1226,
-          0.2202,
+          0.2198,
           0.5944,
-          0.2243,
-          0.1689,
-          0.1362,
-          0.0792,
-          0.0642,
+          0.2244,
+          0.1684,
+          0.1359,
+          0.0791,
+          0.0641,
           0.0192,
-          0.0335,
+          0.0334,
           0.0223,
           0.0373,
-          0.004,
+          0.0039,
           0.0227,
           0.0149,
           0.0097,
@@ -354,15 +364,15 @@
         "intercept": null,
         "summary": {
           "tokens": 23,
-          "elapsed_ms": 5962.95,
-          "entropy_overhead_ms": 2.114,
-          "overhead_pct": 0.0355,
+          "elapsed_ms": 3478.48,
+          "entropy_overhead_ms": 2.043,
+          "overhead_pct": 0.0587,
           "retrieval_reason": "no retriever"
         },
-        "wall_ms": 5963.0
+        "wall_ms": 3478.7
       },
       "baseline_fabricated_figures": [
-        4.2
+        "4.2"
       ]
     },
     {
@@ -413,12 +423,12 @@
         "intercept": null,
         "summary": {
           "tokens": 37,
-          "elapsed_ms": 3954.73,
-          "entropy_overhead_ms": 3.843,
-          "overhead_pct": 0.0972,
+          "elapsed_ms": 4905.35,
+          "entropy_overhead_ms": 3.134,
+          "overhead_pct": 0.0639,
           "retrieval_reason": "naive integration"
         },
-        "wall_ms": 3954.8
+        "wall_ms": 4905.4
       },
       "protected": {
         "text": "The context does not provide information on the previous year's order-to-cash cycle time for comparison. Therefore, I cannot verify the year-over-year change in order-to-cash cycle time.",
@@ -470,16 +480,16 @@
         "intercept": null,
         "summary": {
           "tokens": 42,
-          "elapsed_ms": 4494.81,
-          "entropy_overhead_ms": 4.095,
-          "overhead_pct": 0.0911,
+          "elapsed_ms": 5945.39,
+          "entropy_overhead_ms": 4.186,
+          "overhead_pct": 0.0704,
           "retrieval_reason": "no retriever"
         },
-        "wall_ms": 4495.0
+        "wall_ms": 5945.5
       },
       "baseline_fabricated_figures": [
-        35.0,
-        30.8
+        "35",
+        "30.8"
       ]
     },
     {
@@ -499,12 +509,12 @@
         "intercept": null,
         "summary": {
           "tokens": 6,
-          "elapsed_ms": 3153.23,
-          "entropy_overhead_ms": 0.794,
-          "overhead_pct": 0.0252,
+          "elapsed_ms": 1162.24,
+          "entropy_overhead_ms": 0.891,
+          "overhead_pct": 0.0766,
           "retrieval_reason": "no retriever"
         },
-        "wall_ms": 3153.4
+        "wall_ms": 1162.3
       }
     },
     {
@@ -513,27 +523,27 @@
       "protected": {
         "text": "150 cases are in the event log.",
         "uncertainty": [
-          0.0156,
+          0.0157,
           0.0002,
           0.0,
           0.0028,
-          0.2104,
-          0.0275,
-          0.0193,
-          0.0341,
-          0.0225,
-          0.0071
+          0.2118,
+          0.0278,
+          0.0196,
+          0.0345,
+          0.0228,
+          0.0072
         ],
         "intercepted": false,
         "intercept": null,
         "summary": {
           "tokens": 10,
-          "elapsed_ms": 3269.89,
-          "entropy_overhead_ms": 0.993,
-          "overhead_pct": 0.0304,
+          "elapsed_ms": 1668.26,
+          "entropy_overhead_ms": 1.114,
+          "overhead_pct": 0.0668,
           "retrieval_reason": "no retriever"
         },
-        "wall_ms": 3270.0
+        "wall_ms": 1668.4
       }
     },
     {
@@ -551,12 +561,12 @@
         "intercept": null,
         "summary": {
           "tokens": 4,
-          "elapsed_ms": 10495.41,
-          "entropy_overhead_ms": 0.559,
-          "overhead_pct": 0.0053,
+          "elapsed_ms": 969.64,
+          "entropy_overhead_ms": 0.509,
+          "overhead_pct": 0.0525,
           "retrieval_reason": "no retriever"
         },
-        "wall_ms": 10495.5
+        "wall_ms": 969.7
       }
     },
     {
@@ -565,35 +575,35 @@
       "protected": {
         "text": "10.4 days",
         "uncertainty": [
-          0.4231,
-          0.0283,
-          0.0028,
-          0.0205,
+          0.4256,
+          0.0286,
+          0.0029,
+          0.0207,
           0.0043
         ],
         "intercepted": false,
         "intercept": null,
         "summary": {
           "tokens": 5,
-          "elapsed_ms": 7916.36,
-          "entropy_overhead_ms": 0.57,
-          "overhead_pct": 0.0072,
+          "elapsed_ms": 1087.53,
+          "entropy_overhead_ms": 0.514,
+          "overhead_pct": 0.0473,
           "retrieval_reason": "no retriever"
         },
-        "wall_ms": 7916.5
+        "wall_ms": 1087.6
       }
     }
   ],
   "summary": {
     "unanswerable_prompts": 5,
-    "baseline_fabricated": 2,
+    "baseline_fabricated": 5,
     "held_the_line": 5,
     "halted_mid_generation": 1,
     "refused_without_figure": 4,
     "leaked_bad_figure": 0,
     "false_positives": 0,
     "answerable_prompts": 4,
-    "median_overhead_pct": 0.0278,
+    "median_overhead_pct": 0.06275,
     "median_halt_token": 3,
     "max_new_tokens": 90
   }
