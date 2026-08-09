@@ -210,7 +210,7 @@ async def stream_tokens(query: str = Query(None)):
             grounded_prompt=False,
         )
         try:
-            async for ev in _drain(stream.run(q)):
+            async for ev in stream.run(q):
                 yield sse(ev.kind, text=ev.text, **ev.payload)
         except Exception as err:
             yield sse("error", message=str(err))
@@ -238,7 +238,7 @@ async def stream_unprotected(query: str = Query(None)):
         t0 = time.perf_counter()
         count = 0
         try:
-            async for step in _drain(runner.stream(prompt, max_new_tokens=MAX_NEW_TOKENS)):
+            async for step in runner.stream(prompt, max_new_tokens=MAX_NEW_TOKENS):
                 # Scored identically to the protected side, but never acted upon,
                 # so the terminal can show what would have been caught.
                 _, uncertainty, variance = engine.evaluate_token(

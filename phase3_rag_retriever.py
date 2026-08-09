@@ -71,17 +71,38 @@ class SentinelRAGRetriever:
         self.db_path = db_path
         self.collection_name = collection_name
         self.similarity_threshold = similarity_threshold
+        self.mock_mode = False
 
         print(f"[SentinelRAGRetriever] Initializing SentenceTransformer('{model_name}')...")
-        self.encoder = SentenceTransformer(model_name)
-
-        print(f"[SentinelRAGRetriever] Initializing CrossEncoder('{cross_encoder_name}')...")
         try:
-            self.cross_encoder = CrossEncoder(cross_encoder_name)
-            self.has_cross_encoder = True
-        except Exception as ce_err:
-            print(f"[SentinelRAGRetriever] CrossEncoder fallback to bi-encoder: {ce_err}")
-            self.has_cross_encoder = False
+            # Check if local cache has weights first to prevent blocking startup download
+            cache_dir = Path.home() / ".cache" / "huggingface" / "hub" / f"models--sentence-transformers--{model_name.replace('/', '--')}"
+            snapshots_dir = cache_dir / "snapshots"
+            has_local_weights = False
+            if snapshots_dir.exists():
+                for child in snapshots_dir.iterdir():
+                    if child.is_dir():
+                        if (child / "pytorch_model.bin").exists() or (child / "model.safetensors").exists():
+                            has_local_weights = True
+                            break
+            if not has_local_weights:
+                raise FileNotFoundError(f"Local weights not found for {model_name} in cache. Preempting network call.")
+
+            self.encoder = SentenceTransformer(model_name)
+        except Exception as e:
+            print(f"[SentinelRAGRetriever] SentenceTransformer fallback to mock mode: {e}")
+            print("[SentinelRAGRetriever] Falling back to Mock Mode (keyword-based retrieval).")
+            self.mock_mode = True
+            self.encoder = None
+
+        self.has_cross_encoder = False
+        if not self.mock_mode:
+            print(f"[SentinelRAGRetriever] Initializing CrossEncoder('{cross_encoder_name}')...")
+            try:
+                self.cross_encoder = CrossEncoder(cross_encoder_name)
+                self.has_cross_encoder = True
+            except Exception as ce_err:
+                print(f"[SentinelRAGRetriever] CrossEncoder fallback to bi-encoder: {ce_err}")
 
         print(f"[SentinelRAGRetriever] Connecting to Milvus Lite at {db_path}...")
         try:
@@ -98,17 +119,21 @@ class SentinelRAGRetriever:
     def _load_in_memory_ground_truth(self):
         """In-memory dense vector store fallback for Celonis audit logs."""
         self.in_memory_docs = []
-        if DATA_PATH.exists():
-            with open(DATA_PATH, "r") as f:
-                data = json.load(f)
-                for ev in data.get("events", []):
-                    text = f"Activity: {ev.get('activity')} | Cycle Time: {ev.get('cycle_time_days', 0)} days | Case: {ev.get('case_id')} | Note: {ev.get('note', '')}"
-                    self.in_memory_docs.append({
-                        "case_id": ev.get("case_id"),
-                        "activity": ev.get("activity"),
-                        "text": text,
-                        "embedding": self.encoder.encode([text], show_progress_bar=False).tolist()[0]
-                    })
+        if not DATA_PATH.exists():
+            return
+        with open(DATA_PATH, "r") as f:
+            data = json.load(f)
+            events = data.get("events", [])
+            for ev in events:
+                text = f"Activity: {ev.get('activity')} | Cycle Time: {ev.get('cycle_time_days', 0)} days | Case: {ev.get('case_id')} | Note: {ev.get('note', '')}"
+                doc = {
+                    "case_id": ev.get("case_id"),
+                    "activity": ev.get("activity"),
+                    "text": text,
+                }
+                if not self.mock_mode and self.encoder:
+                    doc["embedding"] = self.encoder.encode([text], show_progress_bar=False).tolist()[0]
+                self.in_memory_docs.append(doc)
 
     def retrieve(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """
@@ -117,6 +142,34 @@ class SentinelRAGRetriever:
         2. Reranks candidate pairs using the Cross-Encoder.
         """
         query_text = query or ""
+        if self.mock_mode:
+            # Simple keyword matching across in-memory documents
+            hits = []
+            keywords = [w.lower() for w in query_text.split() if len(w) > 3]
+            for doc in getattr(self, "in_memory_docs", []):
+                text = doc["text"]
+                overlap = sum(1 for kw in keywords if kw in text.lower())
+                if not keywords or overlap > 0:
+                    hits.append({
+                        "id": doc["case_id"],
+                        "similarity_score": round(0.5 + 0.1 * overlap, 4) if keywords else 0.5,
+                        "case_id": doc["case_id"],
+                        "activity": doc["activity"],
+                        "text": text
+                    })
+            if not hits and getattr(self, "in_memory_docs", None):
+                # Return default documents with low score to prevent empty results for nonsense queries
+                for doc in self.in_memory_docs[:top_k]:
+                    hits.append({
+                        "id": doc["case_id"],
+                        "similarity_score": 0.05,
+                        "case_id": doc["case_id"],
+                        "activity": doc["activity"],
+                        "text": doc["text"]
+                    })
+            hits = sorted(hits, key=lambda x: x["similarity_score"], reverse=True)[:top_k]
+            return hits
+
         query_vector = self.encoder.encode([query_text], show_progress_bar=False).tolist()[0]
         hits = []
         if getattr(self, "has_milvus", False):

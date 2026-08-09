@@ -28,7 +28,7 @@ exactly the case Layer 1 alone misses. That is why both exist.
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, AsyncIterator, List, Optional
 
 import celonis_metrics as cm
 from entropy_engine import EntropyEngine
@@ -250,10 +250,10 @@ class SentinelStream:
 
     # ---------- interception ----------
 
-    def _trip(
+    async def _trip(
         self, query, rag, reason, tok, step, uncertainty, variance, shannon,
         ungrounded_value, emitted, history, t0, overhead_s,
-    ) -> Iterator[InterceptionEvent]:
+    ) -> AsyncIterator[InterceptionEvent]:
         """Emit the interception + autonomous recovery pair for a tripped breaker."""
         yield InterceptionEvent(
             kind="intercept",
@@ -295,7 +295,7 @@ class SentinelStream:
         )
         recovered: List[str] = []
         try:
-            for step in self.runner.stream(
+            async for step in self.runner.stream(
                 self.runner.build_prompt(query, repaired.get("context"), grounded=True),
                 max_new_tokens=self.max_new_tokens,
             ):
@@ -334,7 +334,7 @@ class SentinelStream:
 
     # ---------- the loop ----------
 
-    def run(self, query: str) -> Iterator[InterceptionEvent]:
+    async def run(self, query: str) -> AsyncIterator[InterceptionEvent]:
         rag = self._context_for(query)
         context = rag.get("context")
 
@@ -349,7 +349,7 @@ class SentinelStream:
         emitted = 0
         consecutive = 0         # length of the current run of threshold breaches
 
-        for step in self.runner.stream(prompt, max_new_tokens=self.max_new_tokens):
+        async for step in self.runner.stream(prompt, max_new_tokens=self.max_new_tokens):
             tok = step.text
             c0 = time.perf_counter()
 
@@ -389,10 +389,11 @@ class SentinelStream:
                 trip_reason = "semantic_entropy"
 
             if trip_reason:
-                yield from self._trip(
+                async for ev in self._trip(
                     query, rag, trip_reason, tok, step, uncertainty, variance,
                     shannon, ungrounded_value, emitted, history, t0, overhead_s,
-                )
+                ):
+                    yield ev
                 # The circuit breaker actually breaks: decoding stops here.
                 return
 
@@ -418,11 +419,12 @@ class SentinelStream:
             trailing, _ = self._scan_new_figures(text, scanned_to, complete_only=False)
             if trailing is not None:
                 last = engine.get_metrics_snapshot()
-                yield from self._trip(
+                async for ev in self._trip(
                     query, rag, "ungrounded_number", str(trailing), None, 0.0,
                     last.get("current_variance", 0.0), 0.0, trailing,
                     emitted, history, t0, overhead_s,
-                )
+                ):
+                    yield ev
                 return
 
         total_ms = (time.perf_counter() - t0) * 1000
@@ -437,6 +439,7 @@ class SentinelStream:
                 "retrieval_reason": rag.get("reason"),
             },
         )
+
 
 
 def demo() -> None:

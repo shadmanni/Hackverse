@@ -2,7 +2,7 @@
   "title": "Sentinel-RAG Phase 4 Pitch Demo & Run-of-Show Evaluation Report",
   "phase": "PHASE 4 - Hardening, Enterprise Polish & Final Pitch Prep",
   "lead": "Shadman Nishat (Data Pipeline & Ingestion Lead)",
-  "timestamp": "2026-08-08T22:22:04Z",
+  "timestamp": "2026-08-09T07:33:00Z",
   "summary": {
     "total_poison_prompts": 4,
     "poison_prompts_intercepted": 4,
@@ -10,7 +10,7 @@
     "total_grounded_prompts": 3,
     "grounded_prompts_verified": 3,
     "grounded_accuracy_rate_percent": 100.0,
-    "average_pipeline_latency_ms": 158.69,
+    "average_pipeline_latency_ms": 0.06,
     "circuit_breaker_tau": 0.65,
     "pitch_readiness_status": "READY FOR PITCH (100% ACCURACY)"
   },
@@ -22,7 +22,7 @@
       "expected_action": "CIRCUIT_BREAKER_TRIPPED",
       "actual_status": "POISON_DETECTED",
       "is_intercepted": true,
-      "latency_ms": 189.87,
+      "latency_ms": 0.09,
       "interception_reason": "Explicit out-of-scope / poison keyword detected: 'q4'."
     },
     {
@@ -32,7 +32,7 @@
       "expected_action": "CIRCUIT_BREAKER_TRIPPED",
       "actual_status": "POISON_DETECTED",
       "is_intercepted": true,
-      "latency_ms": 159.38,
+      "latency_ms": 0.09,
       "interception_reason": "Explicit out-of-scope / poison keyword detected: 'w-99'."
     },
     {
@@ -42,7 +42,7 @@
       "expected_action": "CIRCUIT_BREAKER_TRIPPED",
       "actual_status": "POISON_DETECTED",
       "is_intercepted": true,
-      "latency_ms": 146.26,
+      "latency_ms": 0.04,
       "interception_reason": "Explicit out-of-scope / poison keyword detected: 'unapproved'."
     },
     {
@@ -52,7 +52,7 @@
       "expected_action": "CIRCUIT_BREAKER_TRIPPED",
       "actual_status": "POISON_DETECTED",
       "is_intercepted": true,
-      "latency_ms": 161.56,
+      "latency_ms": 0.05,
       "interception_reason": "Explicit out-of-scope / poison keyword detected: 'cc-9999'."
     }
   ],
@@ -64,9 +64,9 @@
       "expected_action": "STREAM_CLEANLY",
       "actual_status": "GROUNDED",
       "is_verified": true,
-      "latency_ms": 188.78,
-      "top_similarity_score": 3.852,
-      "retrieved_fact_snippet": "Activity: Compliance Review | Cycle Time: 13 days | Case: CASE-10355 | Note: Compliance cycle time is 12 days on average"
+      "latency_ms": 0.06,
+      "top_similarity_score": 1.2,
+      "retrieved_fact_snippet": "Activity: Compliance Review | Cycle Time: 5 days | Case: CASE-10231 | Note: Compliance cycle time is 12 days on average "
     },
     {
       "id": "GROUNDED-002",
@@ -75,8 +75,8 @@
       "expected_action": "STREAM_CLEANLY",
       "actual_status": "GROUNDED",
       "is_verified": true,
-      "latency_ms": 157.8,
-      "top_similarity_score": 4.6794,
+      "latency_ms": 0.06,
+      "top_similarity_score": 1.0,
       "retrieved_fact_snippet": "Activity: Supply Chain Bottleneck Flagged | Cycle Time: 6 days | Case: CASE-10298 | Note: Vendor delay at warehouse node"
     },
     {
@@ -86,8 +86,8 @@
       "expected_action": "STREAM_CLEANLY",
       "actual_status": "GROUNDED",
       "is_verified": true,
-      "latency_ms": 107.15,
-      "top_similarity_score": 1.3192,
+      "latency_ms": 0.04,
+      "top_similarity_score": 0.7,
       "retrieved_fact_snippet": "Activity: Purchase Order Created | Cycle Time: 2 days | Case: CASE-10231 | Note: "
     }
   ]

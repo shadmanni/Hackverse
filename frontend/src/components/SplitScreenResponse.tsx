@@ -9,7 +9,6 @@ import {
   Cpu,
   Clock,
   Bot,
-  User,
   CheckCircle2,
   Activity,
 } from "lucide-react";
@@ -147,9 +146,10 @@ function Stat({ label, value, tone }: { label: string; value: string; tone: stri
 interface Props {
   query: string;
   graphName: string;
+  onDone?: () => void;
 }
 
-export default function SplitScreenResponse({ query, graphName }: Props) {
+export default function SplitScreenResponse({ query, graphName, onDone }: Props) {
   const [left, setLeft] = useState<PanelState>(EMPTY);   // unprotected
   const [right, setRight] = useState<PanelState>(EMPTY); // sentinel
   const [healing, setHealing] = useState<{
@@ -239,6 +239,8 @@ export default function SplitScreenResponse({ query, graphName }: Props) {
           setRight((p) => ({ ...p, done: true, error: String(err) }));
         }
       }
+      // Notify parent that both streams have finished
+      if (!ctrl.signal.aborted) onDone?.();
     })();
 
     return () => ctrl.abort();
@@ -259,19 +261,7 @@ export default function SplitScreenResponse({ query, graphName }: Props) {
         : "measuring…";
 
   return (
-    <div className="space-y-4 my-6">
-      <div className="flex items-center gap-3 bg-[#0d1217] border border-[#1e2630] p-4 rounded-lg">
-        <div className="w-8 h-8 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-300 shrink-0">
-          <User className="w-4 h-4" />
-        </div>
-        <div className="min-w-0">
-          <span className="text-xs uppercase tracking-wider text-slate-400 font-mono font-semibold">
-            User Query · {graphName}
-          </span>
-          <p className="text-sm font-medium text-slate-100 break-words">{query}</p>
-        </div>
-      </div>
-
+    <div className="space-y-4">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* ---------------- UNPROTECTED ---------------- */}
         <motion.div
