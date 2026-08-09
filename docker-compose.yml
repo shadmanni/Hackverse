@@ -18,20 +18,21 @@ services:
     networks:
       - sentinel-net
 
-  # --- 2. Streamlit Security Terminal Dashboard ---
+  # --- 2. Next.js Executive Security Terminal ---
   frontend:
     build:
-      context: .
-      dockerfile: Dockerfile.frontend
-    container_name: sentinel-streamlit-dashboard
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: sentinel-nextjs-dashboard
     ports:
-      - "8501:8501"
+      - "3000:3000"
     environment:
-      - BACKEND_URL=http://backend:8000
+      - NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
     depends_on:
       - backend
     networks:
       - sentinel-net
+
 
   # --- 3. Milvus Standalone Vector Database ---
   etcd:
