@@ -17,6 +17,7 @@ Phase 3 Core Capabilities:
 
 import sys
 import json
+import math
 from pathlib import Path
 from typing import Dict, List, Tuple, Any
 
@@ -157,11 +158,19 @@ class SentinelRAGRetriever:
             pairs = [[query_text, h["text"] or ""] for h in hits]
             cross_scores = self.cross_encoder.predict(pairs)
             for i, h in enumerate(hits):
-                h["cross_encoder_score"] = round(float(cross_scores[i]), 4)
+                raw_logit = float(cross_scores[i])
+                # ms-marco CrossEncoder emits an unbounded relevance LOGIT (~ -11..+8),
+                # not a similarity. Fusing it raw with a 0..1 cosine made the fused
+                # score unbounded, so similarity_threshold compared against nothing
+                # meaningful and grounded queries were intercepted as poison.
+                # Squash to 0..1 first so both terms share a scale.
+                cross_prob = 1.0 / (1.0 + math.exp(-raw_logit))
+                h["cross_encoder_logit"] = round(raw_logit, 4)
+                h["cross_encoder_score"] = round(cross_prob, 4)
                 # Weighted fusion score: 60% Cross-Encoder + 40% Vector Cosine
-                h["similarity_score"] = round(0.6 * float(cross_scores[i]) + 0.4 * h["similarity_score"], 4)
+                h["similarity_score"] = round(0.6 * cross_prob + 0.4 * h["similarity_score"], 4)
 
-            # Sort descending by cross-encoder score
+            # Sort descending by fused score
             hits = sorted(hits, key=lambda x: x["similarity_score"], reverse=True)
 
         return hits[:top_k]
