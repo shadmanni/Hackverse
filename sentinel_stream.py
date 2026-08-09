@@ -186,14 +186,10 @@ class SentinelStream:
 
     @classmethod
     def _claim_scope(cls, text: str, figure: str = "", window: int = 160) -> str:
-        """'aggregate' if the claim is about a derived quantity, else 'all'."""
-        # No event field in the log is a percentage, so any percentage the model
-        # states is necessarily derived and must match a derived value. Without
-        # this, "the discount was 15%" was accepted because 15 happens to be some
-        # case's cycle_time_days - a field with nothing to do with discounts.
-        if "%" in figure:
-            return "aggregate"
+        """'percentage' if claiming a percentage or discount, 'aggregate' if derived, else 'all'."""
         recent = text[-window:].lower()
+        if "%" in figure or any(w in recent for w in ("%", "discount", "percentage", "percent")):
+            return "percentage"
         return "aggregate" if any(w in recent for w in cls._AGG_WORDS) else "all"
 
     def _ungrounded_number(

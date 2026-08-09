@@ -106,10 +106,16 @@ def groundable_numbers(path: str = str(DATA_PATH), scope: str = "all") -> Set[fl
         nums.add(round(float(blob["event_count"]), 2))
 
     # Percentages the log supports, e.g. share of orders flagged as bottlenecked.
+    pcts = set()
     if prof["total_cases"]:
         flagged = prof["by_activity"].get("Supply Chain Bottleneck Flagged", {}).get("event_count", 0)
-        nums.add(round(flagged / prof["total_cases"] * 100, 2))
-        nums.add(round(100 - flagged / prof["total_cases"] * 100, 2))
+        pcts.add(round(flagged / prof["total_cases"] * 100, 2))
+        pcts.add(round(100 - flagged / prof["total_cases"] * 100, 2))
+
+    if scope == "percentage":
+        return pcts
+
+    nums.update(pcts)
 
     if scope == "aggregate":
         return nums
@@ -152,6 +158,9 @@ def metric_aliases(path: str = str(DATA_PATH)) -> Dict[str, frozenset]:
         act.get("Compliance Review", {}).get("mean_cycle_days"),
         act.get("Compliance Review", {}).get("max_cycle_days"),
         act.get("Compliance Review", {}).get("event_count"))
+    add("compliance",
+        p["declared_avg_compliance_cycle_time_days"],
+        act.get("Compliance Review", {}).get("mean_cycle_days"))
     add("order-to-cash", p["declared_avg_order_to_cash_days"])
     add("order to cash", p["declared_avg_order_to_cash_days"])
     add("bottleneck",
@@ -183,7 +192,7 @@ def bound_metric(text: str, window: int = 200) -> Optional[str]:
 def is_grounded_number(
     value: float,
     path: str = str(DATA_PATH),
-    rel_tol: float = 0.02,
+    rel_tol: float = 0.005,
     scope: str = "all",
     metric: Optional[str] = None,
 ) -> bool:
