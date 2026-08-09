@@ -152,6 +152,16 @@ def metric_aliases(path: str = str(DATA_PATH)) -> Dict[str, frozenset]:
         if clean:
             out[phrase] = frozenset(clean)
 
+    # The unqualified phrase. Without it, "the mean cycle time is 12.7 days"
+    # bound to nothing, so 12.7 was accepted for being within 2% of 12.47 - the
+    # SUPPLY CHAIN BOTTLENECK mean - while the real overall mean is 8.5. That is
+    # the same cross-metric hole metric binding exists to close, left open on
+    # the most obvious question anyone asks of a process log.
+    #
+    # bound_metric takes the LONGEST match, so a sentence naming a specific
+    # activity ("mean cycle time for Compliance Review") still binds to that
+    # activity and not to this.
+    add("cycle time", p["mean_cycle_days"], p["median_cycle_days"], p["max_cycle_days"])
     add("compliance cycle time",
         p["declared_avg_compliance_cycle_time_days"],
         act.get("Compliance Review", {}).get("mean_cycle_days"))

@@ -115,3 +115,38 @@ class TestRetrieverScoring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestUnqualifiedCycleTimeIsBound(unittest.TestCase):
+    """
+    "What is the mean cycle time?" is the first question anyone asks a process
+    log, and it had no metric binding. A live edge-case run had Granite answer
+    12.7 days - the real overall mean is 8.5 - and the numeric layer passed it,
+    because 12.7 sits within the 2% tolerance of 12.47, the Supply Chain
+    Bottleneck mean. Binding the bare phrase closes it.
+    """
+
+    def test_cross_metric_figure_is_rejected(self):
+        text = "the mean cycle time is 12.7 days"
+        self.assertFalse(
+            cm.is_grounded_number(12.7, scope="aggregate", metric=cm.bound_metric(text)),
+            "a figure from a different metric passed as the overall mean",
+        )
+
+    def test_true_overall_mean_passes(self):
+        text = "the mean cycle time is 8.5 days"
+        self.assertTrue(
+            cm.is_grounded_number(cm.process_profile()["mean_cycle_days"],
+                                  scope="aggregate", metric=cm.bound_metric(text)))
+
+    def test_activity_binding_still_wins_by_longest_match(self):
+        """Adding a generic phrase must not shadow the specific ones."""
+        for text, value in (
+            ("mean cycle time for Compliance Review is 10.43", 10.43),
+            ("Invoice Approved has a mean cycle time of 12.01", 12.01),
+            ("the declared average compliance cycle time is 10.4", 10.4),
+        ):
+            self.assertTrue(
+                cm.is_grounded_number(value, scope="aggregate", metric=cm.bound_metric(text)),
+                f"{value} was rejected for {text!r} - generic phrase shadowed the specific one",
+            )
