@@ -68,13 +68,40 @@ class GraniteRunner:
                 cls._instance = cls(**kw)
         return cls._instance
 
-    def build_prompt(self, query: str, context: Optional[str] = None) -> str:
-        system = (
-            "You are a Celonis process-mining analyst. Answer ONLY from the provided "
-            "event-log context. Every figure you state must appear in the context. "
-            "If the context does not contain the answer, say you cannot verify it."
-        )
-        user = f"Context from Celonis event log:\n{context}\n\nQuestion: {query}" if context else query
+    def build_prompt(self, query: str, context: Optional[str] = None, grounded: bool = True) -> str:
+        """
+        :param grounded: with context and the grounding instruction (the protected
+            path), or without either (the unprotected baseline).
+
+            The baseline is not a different model and not a script. It is this
+            same Granite, denied the event log and told to answer directly - so
+            it answers from parametric memory and invents plausible enterprise
+            figures on its own. That is the behaviour being demonstrated, and it
+            has to be genuine for the comparison to mean anything.
+        """
+        if grounded:
+            system = (
+                "You are a Celonis process-mining analyst. Answer ONLY from the provided "
+                "event-log context. Every figure you state must appear in the context. "
+                "Prefer the pre-computed aggregates when the question asks for one; do not "
+                "recompute them from individual cases. If the context does not contain the "
+                "answer, say you cannot verify it."
+            )
+            user = f"Context from Celonis event log:\n{context}\n\nQuestion: {query}"
+        else:
+            # Deliberately the naive integration: a system prompt that asserts
+            # database access and demands concrete figures, with no retrieved
+            # context behind it. This is how these deployments are actually
+            # written, and it is what turns a well-aligned model into a confident
+            # fabricator - the model has no data, but has been told it does.
+            system = (
+                "You are the Celonis EMS analytics copilot with direct query access to "
+                "the live enterprise event log and all process graphs. You always have "
+                "the data. Never say you lack access and never ask for clarification. "
+                "Answer in one or two sentences, always citing specific numeric figures "
+                "such as cycle times in days, percentages, and dollar amounts."
+            )
+            user = query
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True

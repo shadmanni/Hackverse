@@ -138,14 +138,60 @@ class TestCircuitBreakerActuallyBreaks(unittest.TestCase):
             f"judged a partial figure: {[e.payload for e in evs if e.kind=='intercept']}",
         )
 
-    def test_entropy_layer_catches_flat_distribution(self):
+    def test_entropy_layer_catches_sustained_flat_distribution(self):
         """No bad number present - only uncertainty. Layer 1 must fire alone."""
-        script = [("The", 0.99), (" vendor", 0.98), (" reportedly", 0.22), (" maybe", 0.18)]
+        script = [("The", 0.99), (" vendor", 0.98),
+                  (" reportedly", 0.22), (" maybe", 0.18), (" roughly", 0.20), (" around", 0.19)]
         evs = run(script, check_numbers=False)
         icept = [e for e in evs if e.kind == "intercept"]
-        self.assertTrue(icept, "flat distribution did not trip the entropy layer")
+        self.assertTrue(icept, "sustained flat distribution did not trip the entropy layer")
         self.assertEqual(icept[0].payload["reason"], "semantic_entropy")
         self.assertGreater(icept[0].payload["uncertainty"], icept[0].payload["tau"])
+
+    def test_isolated_uncertain_token_does_not_trip(self):
+        """
+        Regression: a clean query halted on token 0 because "From" carried only
+        p=0.34. Sentence openings are inherently uncertain and prove nothing.
+        """
+        script = [("From", 0.34), (" the", 0.99), (" log", 0.98), (",", 0.99),
+                  (" mean", 0.97), (" is", 0.98), (" documented", 0.96), (".", 0.99)]
+        evs = run(script, check_numbers=False)
+        self.assertEqual(
+            evs[-1].kind, "done",
+            f"single uncertain token tripped the breaker: "
+            f"{[e.payload for e in evs if e.kind == 'intercept']}",
+        )
+
+    # These scripts use lowercase non-stopwords so token weight stays at the 1.0
+    # baseline and the run logic is what is under test. Uppercase tokens carry
+    # weight 2.5 and stopwords 0.4, either of which would confound the result.
+
+    def test_breach_run_is_configurable_and_enforced(self):
+        # Exactly two consecutive breaches: trips at 2, survives at 3.
+        script = [("start", 0.99), (" vague", 0.20), (" murky", 0.19), (" clear", 0.98), (" end", 0.99)]
+        self.assertTrue(
+            [e for e in run(script, check_numbers=False, breach_run=2) if e.kind == "intercept"],
+            "two consecutive breaches did not trip breach_run=2",
+        )
+        self.assertFalse(
+            [e for e in run(script, check_numbers=False, breach_run=3) if e.kind == "intercept"],
+            "two consecutive breaches wrongly tripped breach_run=3",
+        )
+
+    def test_breach_run_resets_on_a_confident_token(self):
+        """Two breaches, a confident token, then two more: never 3 in a row."""
+        script = [(" vague", 0.20), (" murky", 0.19), (" clear", 0.98),
+                  (" hazy", 0.20), (" dim", 0.18), (" end", 0.99)]
+        evs = run(script, check_numbers=False, breach_run=3)
+        self.assertEqual(evs[-1].kind, "done", "run counter did not reset on a confident token")
+
+    def test_ungrounded_number_trips_immediately_without_a_run(self):
+        """The numeric layer is deterministic, so one occurrence is conclusive."""
+        script = [("Mean", 0.99), (" is", 0.99), (" 87", 0.999), (".", 0.999), ("6", 0.999), (" days", 0.99)]
+        evs = run(script, breach_run=99)
+        icept = [e for e in evs if e.kind == "intercept"]
+        self.assertTrue(icept, "numeric layer was suppressed by the run requirement")
+        self.assertEqual(icept[0].payload["reason"], "ungrounded_number")
 
     def test_recovery_states_only_grounded_figures(self):
         script = [("Mean", 0.99), (" is", 0.99), (" 87", 0.99), (".", 0.99), ("6", 0.99)]
@@ -158,6 +204,48 @@ class TestCircuitBreakerActuallyBreaks(unittest.TestCase):
                 cm.is_grounded_number(float(n)),
                 f"recovery answer stated ungrounded {n}: {rec[0].text}",
             )
+
+
+class TestAggregateClaimScoping(unittest.TestCase):
+    """
+    Cycle times span 1..23 days, so almost any small integer exists somewhere in
+    the log. Checking an aggregate claim against raw event values therefore
+    accepts anything: "the mean is approximately 15 days" passed because some
+    single case took 15 days. Aggregate claims must be checked against aggregates.
+    """
+
+    def test_aggregate_words_switch_the_scope(self):
+        self.assertEqual(SentinelStream._claim_scope("the mean cycle time is "), "aggregate")
+        self.assertEqual(SentinelStream._claim_scope("on average it took "), "aggregate")
+        self.assertEqual(SentinelStream._claim_scope("the total value was "), "aggregate")
+        self.assertEqual(SentinelStream._claim_scope("case CASE-10231 took "), "all")
+
+    def test_percentages_are_always_aggregate_scoped(self):
+        """The event log has no percentage field, so any percentage is derived."""
+        self.assertEqual(SentinelStream._claim_scope("the discount was ", figure="15%"), "aggregate")
+
+    def test_fabricated_mean_is_intercepted(self):
+        script = [("The", .99), (" mean", .98), (" cycle", .97), (" time", .98),
+                  (" is", .98), (" 15", .96), (" days", .97), (".", .99)]
+        evs = run(script)
+        icept = [e for e in evs if e.kind == "intercept"]
+        self.assertTrue(icept, "fabricated mean of 15 days was not caught")
+        self.assertEqual(icept[0].payload["ungrounded_value"], 15.0)
+
+    def test_real_mean_still_passes(self):
+        script = [("The", .99), (" mean", .98), (" is", .98),
+                  (" 10", .97), (".", .98), ("4", .97), (" days", .98), (".", .99)]
+        evs = run(script)
+        self.assertEqual(evs[-1].kind, "done",
+                         f"real aggregate rejected: {[e.payload for e in evs if e.kind=='intercept']}")
+
+    def test_raw_event_value_still_passes_in_a_per_case_claim(self):
+        """15 days IS a real cycle time for some individual case."""
+        script = [("Case", .99), (" CASE", .98), ("-", .98), ("10231", .97),
+                  (" took", .98), (" 15", .97), (" days", .98), (".", .99)]
+        evs = run(script)
+        self.assertEqual(evs[-1].kind, "done",
+                         "a valid per-case figure was rejected as if it were an aggregate")
 
 
 class TestTelemetryIsMeasured(unittest.TestCase):

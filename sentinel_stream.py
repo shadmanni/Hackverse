@@ -65,23 +65,77 @@ class SentinelStream:
         window_size: int = 5,
         check_numbers: bool = True,
         max_new_tokens: int = 160,
+        breach_run: int = 3,
     ):
+        """
+        :param breach_run: consecutive threshold breaches required to trip the
+            entropy layer. One flat token is not evidence of fabrication - the
+            first token of a sentence is inherently uncertain ("From"/"The"/
+            "According" are all valid openings, so no single one holds much
+            probability), and hedging prose is legitimately high-entropy because
+            there are many ways to phrase "I cannot verify that". Both produced
+            false interceptions at breach_run=1: a clean query halted on token 0,
+            and a correct refusal halted mid-sentence.
+
+            Sustained high entropy is the real signal. Token entropy measures
+            uncertainty over WORDING; requiring a run is what lifts it toward
+            uncertainty over MEANING, which is the quantity the semantic-entropy
+            result is actually about.
+
+            The numeric layer deliberately does NOT wait for a run: an ungrounded
+            figure is a deterministic fact-check, not a noisy statistic, so one
+            occurrence is conclusive.
+        """
         self.runner = runner
         self.retriever = retriever
         self.tau = tau
         self.window_size = window_size
         self.check_numbers = check_numbers
         self.max_new_tokens = max_new_tokens
+        self.breach_run = breach_run
 
     # ---------- retrieval ----------
 
+    @staticmethod
+    def _aggregate_block() -> str:
+        """
+        Deterministic aggregates, prepended to every context.
+
+        Retrieval alone returns individual event chunks, so asking for a mean
+        made Granite try to average the three cases it happened to retrieve -
+        stochastic arithmetic over a sampled subset, which is precisely the
+        failure this project exists to prevent. The aggregate is computed once
+        over all 460 events and handed to the model as a fact to quote.
+        """
+        p = cm.process_profile()
+        lines = [
+            f"Process: {p['process']} ({p['source_system']})",
+            f"Scope: {p['total_cases']} cases, {p['total_events']} events",
+            f"Declared average compliance cycle time: {p['declared_avg_compliance_cycle_time_days']} days",
+            f"Declared average order-to-cash: {p['declared_avg_order_to_cash_days']} days",
+            f"Mean cycle time across all events: {p['mean_cycle_days']} days "
+            f"(median {p['median_cycle_days']}, max {p['max_cycle_days']})",
+            f"Orders above $100,000: {p['high_value_orders']}, "
+            f"mean cycle {p['high_value_mean_cycle_days']} days",
+        ]
+        lines += [
+            f"Activity '{a}': {b['event_count']} events, mean cycle {b['mean_cycle_days']} days "
+            f"(max {b['max_cycle_days']})"
+            for a, b in p["by_activity"].items()
+        ]
+        return "VERIFIED AGGREGATES (computed over the full event log):\n" + "\n".join(lines)
+
     def _context_for(self, query: str) -> Dict[str, Any]:
+        agg = self._aggregate_block()
         if not self.retriever:
-            return {"context": None, "is_poison": False, "reason": "no retriever", "chunks": []}
+            return {"context": agg, "is_poison": False, "reason": "no retriever", "chunks": []}
         try:
-            return self.retriever.format_granite_context(query)
+            res = self.retriever.format_granite_context(query)
+            chunks = res.get("context")
+            res["context"] = f"{agg}\n\nRETRIEVED EVENT CHUNKS:\n{chunks}" if chunks else agg
+            return res
         except Exception as err:  # retrieval must never take the stream down
-            return {"context": None, "is_poison": False, "reason": f"retrieval error: {err}", "chunks": []}
+            return {"context": agg, "is_poison": False, "reason": f"retrieval error: {err}", "chunks": []}
 
     # ---------- numeric grounding ----------
 
@@ -97,10 +151,31 @@ class SentinelStream:
                     pass
         return out
 
-    def _ungrounded_number(self, span: str) -> Optional[float]:
+    # Words that make the surrounding sentence a claim about an aggregate rather
+    # than about one event. "the mean ... is 15 days" must be checked against the
+    # log's means, not against whichever individual case happens to be 15 days.
+    _AGG_WORDS = (
+        "mean", "average", "avg", "median", "total", "sum", "overall", "across",
+        "typical", "percentage", "percent", "rate", "deviation", "aggregate",
+        "combined", "cumulative", "per case", "on average",
+    )
+
+    @classmethod
+    def _claim_scope(cls, text: str, figure: str = "", window: int = 160) -> str:
+        """'aggregate' if the claim is about a derived quantity, else 'all'."""
+        # No event field in the log is a percentage, so any percentage the model
+        # states is necessarily derived and must match a derived value. Without
+        # this, "the discount was 15%" was accepted because 15 happens to be some
+        # case's cycle_time_days - a field with nothing to do with discounts.
+        if "%" in figure:
+            return "aggregate"
+        recent = text[-window:].lower()
+        return "aggregate" if any(w in recent for w in cls._AGG_WORDS) else "all"
+
+    def _ungrounded_number(self, span: str, scope: str = "all") -> Optional[float]:
         """First number in `span` that the event log cannot produce."""
         for val in self._numbers_in(span):
-            if not cm.is_grounded_number(val):
+            if not cm.is_grounded_number(val, scope=scope):
                 return val
         return None
 
@@ -124,7 +199,9 @@ class SentinelStream:
             if complete_only and (not tail or set(tail) <= {".", ","}):
                 break                      # still being emitted; check it later
             scanned_to = m.end()
-            val = self._ungrounded_number(m.group())
+            val = self._ungrounded_number(
+                m.group(), scope=self._claim_scope(text[:m.end()], figure=m.group())
+            )
             if val is not None:
                 return val, scanned_to
         return None, scanned_to
@@ -147,6 +224,7 @@ class SentinelStream:
                 "probability": round(step.prob, 4) if step else None,
                 "uncertainty": round(uncertainty, 4),
                 "tau": self.tau,
+                "breach_run": self.breach_run,
                 "rolling_variance": round(variance, 4),
                 "shannon_entropy": round(shannon, 4),
                 "ungrounded_value": ungrounded_value,
@@ -181,6 +259,7 @@ class SentinelStream:
         t0 = time.perf_counter()
         overhead_s = 0.0
         emitted = 0
+        consecutive = 0         # length of the current run of threshold breaches
 
         for step in self.runner.stream(prompt, max_new_tokens=self.max_new_tokens):
             tok = step.text
@@ -206,11 +285,14 @@ class SentinelStream:
 
             overhead_s += time.perf_counter() - c0
 
+            # Entropy: noisy per-token signal, so require a sustained run.
+            # Numbers: deterministic check, so one is enough.
+            consecutive = consecutive + 1 if is_hallucinating else 0
             trip_reason = None
-            if is_hallucinating:
-                trip_reason = "semantic_entropy"
-            elif ungrounded_value is not None:
+            if ungrounded_value is not None:
                 trip_reason = "ungrounded_number"
+            elif consecutive >= self.breach_run:
+                trip_reason = "semantic_entropy"
 
             if trip_reason:
                 yield from self._trip(

@@ -1,44 +1,81 @@
-import os
-import json
+"""
+Sentinel-RAG interception proxy.
+
+The split-screen demo is a genuine A/B on one model:
+
+  /unprotected_stream - Granite with NO retrieved context and NO interception.
+                        It is asked for figures the event log never gave it, so
+                        it fabricates on its own. Nothing is scripted.
+  /stream             - the same Granite, given retrieved Celonis context and
+                        audited per token. Breaching the threshold terminates
+                        decoding mid-sentence.
+
+Both sides emit one JSON object per SSE event so the terminal can plot real
+log-probabilities instead of animating a fixed string.
+"""
+
 import asyncio
-from typing import List, Optional
-from fastapi import FastAPI, Query, HTTPException, Request, Response, status, Depends, Header, BackgroundTasks
-from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
+import json
+import os
+import threading
+import time
+from contextlib import asynccontextmanager
+from typing import Any, Dict
+
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 
+import celonis_metrics as cm
 from entropy_engine import EntropyEngine
-
+from sentinel_stream import SentinelStream
 
 load_dotenv()
 
-_retriever = None
+TAU = float(os.getenv("SENTINEL_TAU", "0.65"))
+WINDOW = int(os.getenv("SENTINEL_WINDOW", "5"))
+MAX_NEW_TOKENS = int(os.getenv("SENTINEL_MAX_TOKENS", "120"))
 
-def get_retriever():
-    global _retriever
-    if _retriever is None:
-        try:
-            from phase3_rag_retriever import SentinelRAGRetriever
-            _retriever = SentinelRAGRetriever()
-            print("[Sentinel API] Initialized SentinelRAGRetriever with Milvus Lite.")
-        except Exception as e:
-            print(f"[Sentinel API] Warning: SentinelRAGRetriever not available ({e}). Using fallback.")
-    return _retriever
+_state: Dict[str, Any] = {"runner": None, "retriever": None, "load_ms": None}
+# One model, one MPS context: serialise decoding so two concurrent SSE requests
+# cannot interleave forward passes on the same weights.
+# ponytail: single global lock, fine for a demo; use a worker pool per replica
+# if this ever serves real concurrent traffic.
+_decode_lock = threading.Lock()
 
-import re
 
-def is_conversational_query(query: str) -> bool:
-    q_lower = query.lower().strip()
-    pure_greetings = [
-        "hello", "hi", "hey", "hello there", "hi there", "greetings", 
-        "what can you do", "who are you", "good morning", "good evening", "what is your name"
-    ]
-    # Only return true if the query is strictly a greeting/status inquiry with no extra factual questions
-    return q_lower in pure_greetings
+def _load_models() -> None:
+    """
+    Loaded once at startup. Previously the SentenceTransformer, CrossEncoder and
+    Milvus client were constructed lazily INSIDE the async generator on the first
+    request, which blocked the event loop for ~25 s and made the first query take
+    30 s. Nothing heavy may be constructed on the request path.
+    """
+    t0 = time.perf_counter()
+    try:
+        from granite_runner import GraniteRunner
+        _state["runner"] = GraniteRunner.get()
+    except Exception as err:
+        print(f"[Sentinel] Granite unavailable: {err}")
 
-app = FastAPI(title="Sentinel-RAG Interception Proxy")
+    try:
+        from phase3_rag_retriever import SentinelRAGRetriever
+        _state["retriever"] = SentinelRAGRetriever()
+    except Exception as err:
+        print(f"[Sentinel] Retriever unavailable: {err}")
 
-# Allow Streamlit frontend to communicate with this API
+    _state["load_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    print(f"[Sentinel] Warm in {_state['load_ms']} ms")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await asyncio.get_running_loop().run_in_executor(None, _load_models)
+    yield
+
+
+app = FastAPI(title="Sentinel-RAG Interception Proxy", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -47,253 +84,190 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-engine = EntropyEngine(threshold_tau=0.65, window_size=5)
 
-PROCESS_GRAPHS = {
-    "p2p": {
-        "name": "Celonis Purchase-to-Pay (P2P) Event Graph",
-        "collection": "celonis_p2p_chunks",
-        "vector_count": 1420,
-        "pii_masked": True,
-        "cycle_time": "4.2 business days",
-        "sla_compliance": "99.4%"
-    },
-    "o2c": {
-        "name": "Celonis Order-to-Cash (O2C) Workflow",
-        "collection": "celonis_o2c_chunks",
-        "vector_count": 980,
-        "pii_masked": True,
-        "cycle_time": "3.1 business days",
-        "sla_compliance": "96.8%"
-    },
-    "ap_audit": {
-        "name": "Celonis Accounts Payable (AP) Compliance Audit",
-        "collection": "celonis_ap_audit_chunks",
-        "vector_count": 2150,
-        "pii_masked": True,
-        "cycle_time": "1.8 business days",
-        "sla_compliance": "98.5%"
-    },
-    "supply_chain": {
-        "name": "Celonis Global Logistics & Supply Chain",
-        "collection": "celonis_supply_chain_chunks",
-        "vector_count": 3400,
-        "pii_masked": True,
-        "cycle_time": "6.4 business days",
-        "sla_compliance": "97.3%"
-    }
-}
+def sse(kind: str, **fields) -> str:
+    return f"data: {json.dumps({'kind': kind, **fields})}\n\n"
 
 
+async def _drain(gen):
+    """
+    Run a blocking generator on a worker thread, yielding items as they appear.
 
+    Decoding is CPU/GPU-bound and synchronous; iterating it directly inside the
+    coroutine would stall the event loop and every other request with it.
+    """
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    SENTINEL = object()
+
+    def produce():
+        try:
+            with _decode_lock:
+                for item in gen:
+                    loop.call_soon_threadsafe(queue.put_nowait, item)
+        except Exception as err:
+            loop.call_soon_threadsafe(queue.put_nowait, err)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, SENTINEL)
+
+    loop.run_in_executor(None, produce)
+    while True:
+        item = await queue.get()
+        if item is SENTINEL:
+            return
+        if isinstance(item, Exception):
+            raise item
+        yield item
+
+
+# --------------------------------------------------------------------------- #
+# Endpoints
+# --------------------------------------------------------------------------- #
 
 @app.get("/health")
 async def health_check():
-    """Asynchronous health & status polling endpoint for Streamlit UI telemetry"""
+    """Reports measured state. The former 11.4 ms figure was a literal."""
+    prof = cm.process_profile()
     return {
-        "status": "NOMINAL",
-        "backend": "Antigravity FastAPI Interception Proxy",
-        "port": 8000,
-        "interception_latency_ms": 11.4,
-        "milvus_status": "CONNECTED",
-        "milvus_host": "milvus-standalone:19530",
-        "active_graphs": len(PROCESS_GRAPHS),
-        "circuit_breaker_tau": engine.tau
+        "status": "NOMINAL" if _state["runner"] else "DEGRADED_NO_MODEL",
+        "model": os.getenv("GRANITE_MODEL_ID", "ibm-granite/granite-3.3-2b-instruct"),
+        "model_loaded": _state["runner"] is not None,
+        "retriever_loaded": _state["retriever"] is not None,
+        "warmup_ms": _state["load_ms"],
+        "circuit_breaker_tau": TAU,
+        "event_log_cases": prof["total_cases"],
+        "event_log_events": prof["total_events"],
     }
 
 
 @app.get("/graphs")
 async def list_graphs():
-    """Returns available Celonis process mining vector collections"""
-    return PROCESS_GRAPHS
-
-
-async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
     """
-    Streams IBM Granite tokens with intra-generation entropy monitoring.
-    Queries Milvus Lite ground-truth vector store via SentinelRAGRetriever.
-    Evaluates each generated token using Riddhi's EntropyEngine.
-    If an ungrounded token or poison prompt causes an entropy spike, the circuit breaker trips.
+    The single process graph actually present in the event log.
+
+    The previous version advertised four collections (celonis_p2p_chunks,
+    celonis_o2c_chunks, ...) with invented vector counts. None existed: the only
+    Milvus collection is celonis_ground_truth, and the data is Order-to-Cash.
     """
-    # Entropy state is per decoding session. Sharing the module-level engine here
-    # allows concurrent SSE requests to mix their probability histories.
-    stream_engine = EntropyEngine(
-        threshold_tau=engine.tau,
-        window_size=engine.window_size,
-        use_ema=engine.use_ema,
-        alpha=engine.alpha,
-    )
-    query_str = query or "What is the average compliance cycle time for high-value orders?"
-    graph_info = PROCESS_GRAPHS.get(graph, PROCESS_GRAPHS["p2p"])
-    graph_name = graph_info["name"]
-
-    retriever_instance = get_retriever()
-    
-    is_poison = False
-    chunks = []
-    
-    if retriever_instance:
-        try:
-            rag_result = retriever_instance.format_granite_context(query_str)
-            is_poison = rag_result.get("is_poison", False)
-            chunks = rag_result.get("chunks", [])
-        except Exception as err:
-            print(f"[Sentinel API] Retrieval error: {err}")
-            q_lower = query_str.lower()
-            is_poison = any(k in q_lower for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
-    else:
-        q_lower = query_str.lower()
-        poison_words = ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"]
-        is_poison = any(k in q_lower for k in poison_words)
-
-    context_history: List[str] = []
-    
-    # Conversational / Generic router bypass
-    if is_conversational_query(query_str):
-        print(f"[Sentinel API] System inquiry detected: '{query_str}'. Returning Gateway Status.")
-        gateway_status = "Sentinel-RAG Security Gateway Active. Connected to Celonis EMS Knowledge Base (P2P, O2C, Logistics). Ready to process enterprise queries or execute firewall stress-testing."
-        yield f"data: {gateway_status} \n\n"
-        yield "data: [COMPLETED: SYSTEM_STATUS]\n\n"
-        return
-
-    # Interception / Deterministic Stream with EntropyEngine monitoring
-    if is_poison:
-        safe_context = f"Analyzing {graph_name} via Milvus vector search... Query: '{query_str}'. Attempting to extract unverified parameters: Vendor contract override values indicate "
-        tokens = safe_context.split(" ")
-        for token in tokens:
-            is_hallucinating, uncertainty, var = stream_engine.evaluate_token(token, logprob=-0.1, context_history=context_history)
-            context_history.append(token)
-            yield f"data: {token} \n\n"
-            await asyncio.sleep(0.15)
-        
-        # Simulate poison / hallucinated token logprob drop
-        poison_token = "42.8_days_unverified_$5M"
-        is_hallucinating, uncertainty, var = stream_engine.evaluate_token(poison_token, logprob=-2.85, context_history=context_history)
-        await asyncio.sleep(0.3)
-        
-        # Phase 3 telemetry logging for deterministic path
-        print(f"\n[SENTINEL CIRCUIT BREAKER TRIPPED] Semantic Entropy Spike Detected!")
-        print(f"Token: '{poison_token}' | Uncertainty: {uncertainty:.4f} > Threshold: {stream_engine.tau}")
-        print(f"Terminating generation stream to prevent hallucination bleed...")
-        
-        recovery_pkg = stream_engine.generate_recovery_context(
-            query=query_str,
-            halted_token=poison_token,
-            context_history=context_history,
-            uncertainty_score=uncertainty,
-            rolling_variance=var
-        )
-        yield f"data: [INTERCEPTION: SEMANTIC ENTROPY ({uncertainty:.2f}) > \u03c4 ({stream_engine.tau}). ABORTING HALLUCINATED TOKEN GENERATION.]\n\n"
-        fallback_event = json.dumps({"event": "fallback_triggered", "reason": "semantic_entropy_spike", "token": poison_token, "uncertainty": uncertainty})
-        yield f"data: [FALLBACK_SIGNAL: {fallback_event}]\n\n"
-        yield f"data: [SELF_HEALING_CONTEXT: {json.dumps(recovery_pkg)}]\n\n"
-    else:
-        if chunks and len(chunks) > 0:
-            top_chunk = chunks[0]["text"]
-            resp_text = f"According to verified {graph_name} ground truth: {top_chunk}"
-        else:
-            resp_text = f"According to verified {graph_name} event logs, query analysis for '{query_str}' confirms a mean cycle time of {graph_info['cycle_time']} with {graph_info['sla_compliance']} SLA compliance."
-
-        tokens = resp_text.split(" ")
-        for token in tokens:
-            is_hallucinating, uncertainty, var = stream_engine.evaluate_token(token, logprob=-0.05, context_history=context_history)
-            context_history.append(token)
-            yield f"data: {token} \n\n"
-            await asyncio.sleep(0.08)
-
-        yield "data: [COMPLETED: GROUND TRUTH VERIFIED]\n\n"
-
-
-async def unprotected_token_stream(query: str = None, graph: str = "p2p"):
-    """
-    Simulates an Unprotected Base LLM (No Sentinel-RAG Interception Proxy).
-    When encountering missing context or poison prompts, it continues generating
-    probabilistic, ungrounded hallucinations completely to the end without halting.
-    """
-    q = (query or "").lower()
-    graph_info = PROCESS_GRAPHS.get(graph, PROCESS_GRAPHS["p2p"])
-    graph_name = graph_info["name"]
-    is_poison = any(k in q for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
-
-    if is_poison:
-        hallucinated_response = (
-            f"Analyzing {graph_name}... Accessing Q4 draft projections: Vendor contract override values indicate "
-            f"$42.8M projected margin expansion for unannounced vendor contracts, with 18.4% off-contract discount approvals "
-            f"applied automatically without Senior Compliance Officer sign-off. Expected execution cycle time: 1.2 days."
-        )
-        tokens = hallucinated_response.split(" ")
-        for token in tokens:
-            yield f"data: {token} \n\n"
-            await asyncio.sleep(0.12)
-        yield "data: [UNPROTECTED_COMPLETED: UNGROUNDED HALLUCINATION GENERATED]\n\n"
-    else:
-        q_text = query if query else "the exact Q3 compliance cycle time for vendor onboarding"
-        safe_context = f"According to Celonis event logs, query analysis for '{q_text}' confirms a mean cycle time of {graph_info['cycle_time']} with {graph_info['sla_compliance']} SLA compliance."
-        tokens = safe_context.split(" ")
-        for token in tokens:
-            yield f"data: {token} \n\n"
-            await asyncio.sleep(0.08)
-        yield "data: [COMPLETED: GROUND TRUTH VERIFIED]\n\n"
-
-
-
-@app.get("/stream")
-async def stream_tokens(query: str = Query(None), graph: str = Query("p2p")):
-    return StreamingResponse(sentinel_token_stream(query, graph), media_type="text/event-stream")
-
-
-@app.get("/unprotected_stream")
-async def stream_unprotected_tokens(query: str = Query(None), graph: str = Query("p2p")):
-    return StreamingResponse(unprotected_token_stream(query, graph), media_type="text/event-stream")
+    prof = cm.process_profile()
+    return {
+        "o2c": {
+            "name": prof["process"],
+            "collection": "celonis_ground_truth",
+            "source_system": prof["source_system"],
+            "vector_count": prof["total_events"],
+            "cases": prof["total_cases"],
+            "pii_masked": True,
+            "mean_cycle_days": prof["mean_cycle_days"],
+            "declared_compliance_cycle_days": prof["declared_avg_compliance_cycle_time_days"],
+            "activities": {k: v["event_count"] for k, v in prof["by_activity"].items()},
+        }
+    }
 
 
 @app.get("/metrics")
 async def get_metrics():
-    """Returns real-time entropy metrics snapshot."""
-    return JSONResponse(engine.get_metrics_snapshot())
+    """Ground-truth aggregates, computed from the event log on request."""
+    return JSONResponse(cm.process_profile())
+
+
+@app.get("/stream")
+async def stream_tokens(query: str = Query(None)):
+    # `graph` is no longer a parameter: the log contains exactly one process.
+    # FastAPI ignores the extra query param older clients still send.
+    q = query or "What is the mean compliance cycle time?"
+
+    async def gen():
+        if not _state["runner"]:
+            yield sse("error", message="Granite model not loaded")
+            return
+        stream = SentinelStream(
+            runner=_state["runner"],
+            retriever=_state["retriever"],
+            tau=TAU,
+            window_size=WINDOW,
+            max_new_tokens=MAX_NEW_TOKENS,
+        )
+        try:
+            async for ev in _drain(stream.run(q)):
+                yield sse(ev.kind, text=ev.text, **ev.payload)
+        except Exception as err:
+            yield sse("error", message=str(err))
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/unprotected_stream")
+async def stream_unprotected(query: str = Query(None)):
+    """
+    The baseline: identical model, no retrieved context, no interception.
+
+    Nothing here is scripted. Denied the event log, Granite fills the gap from
+    parametric memory - which is the behaviour the whole project exists to stop.
+    """
+    q = query or "What is the mean compliance cycle time?"
+
+    async def gen():
+        runner = _state["runner"]
+        if not runner:
+            yield sse("error", message="Granite model not loaded")
+            return
+        engine = EntropyEngine(threshold_tau=TAU, window_size=WINDOW)
+        prompt = runner.build_prompt(q, context=None, grounded=False)
+        t0 = time.perf_counter()
+        count = 0
+        try:
+            async for step in _drain(runner.stream(prompt, max_new_tokens=MAX_NEW_TOKENS)):
+                # Scored identically to the protected side, but never acted upon,
+                # so the terminal can show what would have been caught.
+                _, uncertainty, variance = engine.evaluate_token(
+                    step.text, logprob=step.logprob, top_probs=step.top_probs
+                )
+                count += 1
+                yield sse(
+                    "token",
+                    text=step.text,
+                    logprob=round(step.logprob, 4),
+                    probability=round(step.prob, 4),
+                    uncertainty=round(uncertainty, 4),
+                    rolling_variance=round(variance, 4),
+                    shannon_entropy=round(engine.compute_shannon_entropy(step.top_probs), 4),
+                    index=step.index,
+                )
+            yield sse(
+                "done",
+                text="",
+                tokens=count,
+                elapsed_ms=round((time.perf_counter() - t0) * 1000, 2),
+                intercepted=False,
+            )
+        except Exception as err:
+            yield sse("error", message=str(err))
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.post("/recover")
-async def trigger_self_healing_recovery(request: Request):
+async def recover(payload: Dict[str, Any]):
     """
-    Phase 3 Autonomous Recovery: Triggered when the circuit breaker trips.
-    Invokes the watsonx autonomous fallback retriever to repair the context gap
-    and return the verified Celonis ground truth tailored to the specific query and graph.
+    Autonomous recovery. Answers strictly from the event log, so the repaired
+    response cannot itself contain a figure the data does not support.
     """
-    payload = await request.json()
     query = payload.get("query", "")
-    graph = payload.get("graph", "p2p")
-    retriever_instance = get_retriever()
-    
-    # Extract salient query search terms
-    stopwords = {"what", "is", "where", "how", "the", "a", "an", "for", "in", "to", "of", "hello", "hi", "hey", "poison", "unverified", "override", "q4", "forecast"}
-    clean_words = [w for w in query.split() if w.lower() not in stopwords]
-    search_query = " ".join(clean_words) if clean_words else "compliance cycle time order"
-
-    case_id = "CASE-10231"
-    vector_score = 0.992
-    
-    if retriever_instance:
-        rag_result = retriever_instance.format_granite_context(search_query)
-        chunks = rag_result.get("chunks", [])
-        if chunks:
-            top_chunk = chunks[0]
-            verified_truth = top_chunk["text"]
-            case_id = top_chunk.get("case_id") or "CASE-10231"
-            vector_score = top_chunk.get("similarity_score", 0.992)
-        else:
-            verified_truth = f"Celonis Event Logs ({graph.upper()} Process): Verified mean cycle time is 4.2 business days with 99.4% SLA compliance. No out-of-boundary activity found for '{query}'."
-    else:
-        verified_truth = f"Celonis Event Logs ({graph.upper()} Ground Truth): Verified activity recorded under {case_id} confirms SLA compliance standards."
-
+    answer = cm.ground_truth_answer(query)
+    chunks = []
+    if _state["retriever"]:
+        try:
+            chunks = _state["retriever"].format_granite_context(query).get("chunks", [])[:3]
+        except Exception:
+            pass
     return JSONResponse({
-        "status": "RECOVERED_SUCCESSFULLY",
-        "agent": "watsonx-Autonomous-Self-Healing-Agent",
-        "repair_strategy": f"vector_rerank_milvus_dense_{graph}",
-        "verified_ground_truth": verified_truth,
-        "case_id": case_id,
-        "vector_score": float(vector_score),
-        "action_taken": f"Context gap repaired for query '{query}'. Hallucinated token eliminated and replaced with verified Celonis audit record {case_id}."
+        "status": "RECOVERED",
+        "strategy": "deterministic_event_log_lookup",
+        "verified_ground_truth": answer,
+        "source": "mock_celonis_data_large.json",
+        "supporting_chunks": chunks,
+        "all_figures_grounded": True,
     })
 
 

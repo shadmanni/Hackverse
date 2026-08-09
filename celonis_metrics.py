@@ -79,21 +79,23 @@ def process_profile(path: str = str(DATA_PATH)) -> Dict[str, Any]:
     }
 
 
-@lru_cache(maxsize=4)
-def groundable_numbers(path: str = str(DATA_PATH)) -> Set[float]:
+@lru_cache(maxsize=8)
+def groundable_numbers(path: str = str(DATA_PATH), scope: str = "all") -> Set[float]:
     """
-    Every numeric value a truthful answer could contain: raw field values plus
-    the derived aggregates. A number outside this set is not in the data, so an
-    assertion containing it cannot be grounded in the event log.
+    Numbers a truthful answer may contain.
+
+    scope="aggregate" - only derived and declared aggregates.
+    scope="all"       - aggregates plus every raw per-event field value.
+
+    The distinction is what makes the check useful. Cycle times run 1..23 days,
+    so under scope="all" almost any small integer is "in the data" and the claim
+    "the mean compliance cycle time is approximately 15 days" passes - 15 is some
+    individual case's cycle time. But a claim ABOUT A MEAN is only true if it
+    matches a mean. Scoping the comparison to aggregates is what catches it:
+    15 is not any aggregate the log produces (the real value is 10.4).
     """
-    events = load_events(path)
     prof = process_profile(path)
     nums: Set[float] = set()
-
-    for ev in events:
-        for key in ("cycle_time_days", "amount_usd"):
-            if ev.get(key) is not None:
-                nums.add(round(float(ev[key]), 2))
 
     for key, val in prof.items():
         if isinstance(val, (int, float)) and not isinstance(val, bool):
@@ -109,18 +111,33 @@ def groundable_numbers(path: str = str(DATA_PATH)) -> Set[float]:
         nums.add(round(flagged / prof["total_cases"] * 100, 2))
         nums.add(round(100 - flagged / prof["total_cases"] * 100, 2))
 
+    if scope == "aggregate":
+        return nums
+
+    for ev in load_events(path):
+        for key in ("cycle_time_days", "amount_usd"):
+            if ev.get(key) is not None:
+                nums.add(round(float(ev[key]), 2))
     return nums
 
 
-def is_grounded_number(value: float, path: str = str(DATA_PATH), rel_tol: float = 0.02) -> bool:
+def is_grounded_number(
+    value: float,
+    path: str = str(DATA_PATH),
+    rel_tol: float = 0.02,
+    scope: str = "all",
+) -> bool:
     """
     True when `value` matches a number the event log can produce, within 2%.
 
     The tolerance absorbs the model's rounding ("8.5" for 8.50), not fabrication:
     a hallucinated figure is wrong by far more than 2% essentially always.
+
+    Pass scope="aggregate" when the surrounding sentence is asserting a mean,
+    total, rate or percentage. See groundable_numbers for why that matters.
     """
     target = round(float(value), 2)
-    for known in groundable_numbers(path):
+    for known in groundable_numbers(path, scope):
         if known == target:
             return True
         scale = max(abs(known), abs(target), 1e-9)
