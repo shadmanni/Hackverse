@@ -61,7 +61,7 @@ class SentinelStream:
         self,
         runner,
         retriever=None,
-        tau: float = 0.65,
+        tau: float = 0.85,
         window_size: int = 5,
         check_numbers: bool = True,
         max_new_tokens: int = 160,
@@ -87,15 +87,24 @@ class SentinelStream:
             figure is a deterministic fact-check, not a noisy statistic, so one
             occurrence is conclusive.
 
-            Default of 2 comes from calibrate_tau.py against real Granite
-            log-probabilities. Answerable prompts peaked at 0.387 (p90) and 1.150
-            (max) per-token uncertainty; unanswerable reached 1.059 (p90) and
-            2.873 (max). The sweep's best separator was tau=1.25 with run=1 -
-            6/6 detected, no false positives - but that tau sits only 0.10 above
-            the answerable maximum and is fitted to six prompts. tau=1.0 with
-            run=2 requires a SUSTAINED excursion, which no answerable prompt
-            produced at all, so it generalises better at the cost of two
-            detections the numeric layer catches anyway.
+            Default of 2 comes from calibrate_tau.py, re-measured 2026-08-09
+            against the granite3.3:8b actually being served. The numbers this
+            docstring used to quote (answerable p90 0.387 / max 1.150) came from
+            the transformers granite-3.3-2b runner and were never re-taken after
+            the move to Ollama, because the script had a plain `for` over an
+            async generator and could not run.
+
+            Live figures, 6 prompts per class: answerable median 0.054, p90
+            0.637, max 1.723; unanswerable median 0.042, p90 1.210, max 3.681.
+            The two class MEDIANS are indistinguishable - the separation lives
+            entirely in the tail, which is the honest reason a single breach is
+            not evidence and a run is required.
+
+            No setting in the sweep separates the classes cleanly. Every setting
+            that detects 6/6 costs 2-4 false positives; the best zero-false-
+            positive setting is tau=0.85 run=2 at 3/6. A false positive halts a
+            correct answer in front of the judges, a miss is picked up by the
+            numeric layer, so the trade is taken toward silence.
         """
         self.runner = runner
         self.retriever = retriever
@@ -129,8 +138,9 @@ class SentinelStream:
             f"Declared average order-to-cash: {p['declared_avg_order_to_cash_days']} days",
             f"Mean cycle time across all events: {p['mean_cycle_days']} days "
             f"(median {p['median_cycle_days']}, max {p['max_cycle_days']})",
-            f"Orders above $100,000: {p['high_value_orders']}, "
-            f"mean cycle {p['high_value_mean_cycle_days']} days",
+            f"Orders above $100,000: {p['high_value_orders']} of {p['total_cases']} orders "
+            f"({p['high_value_events']} of {p['total_events']} events), "
+            f"mean cycle {p['high_value_mean_cycle_days']} days across those events",
         ]
         lines += [
             f"Activity '{a}': {b['event_count']} events, mean cycle {b['mean_cycle_days']} days "

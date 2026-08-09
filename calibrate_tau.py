@@ -55,11 +55,17 @@ TAUS = [0.45, 0.55, 0.65, 0.75, 0.85, 1.00, 1.25]
 RUNS = [1, 2, 3, 4, 5]
 
 
-def collect(runner, query: str, grounded: bool, max_new_tokens: int = 90) -> List[float]:
+async def collect(runner, query: str, grounded: bool, max_new_tokens: int = 90) -> List[float]:
     """Per-token weighted uncertainty for one generation, at a fixed tau.
 
     The uncertainty score does not depend on tau - tau is only the comparison -
     so one pass per prompt is enough to evaluate every threshold afterwards.
+
+    Async because OllamaRunner.stream is an async generator. It was previously
+    driven by a plain `for`, which raises TypeError before the first token - so
+    this script could not run at all after the move from the transformers
+    runner, and data/tau_calibration.json was left describing a model that is
+    no longer the one being served.
     """
     engine = EntropyEngine(threshold_tau=0.65)
     context = None
@@ -68,7 +74,7 @@ def collect(runner, query: str, grounded: bool, max_new_tokens: int = 90) -> Lis
         context = SentinelStream._aggregate_block()
     prompt = runner.build_prompt(query, context, grounded=grounded)
     scores = []
-    for step in runner.stream(prompt, max_new_tokens=max_new_tokens):
+    async for step in runner.stream(prompt, max_new_tokens=max_new_tokens):
         _, uncertainty, _ = engine.evaluate_token(
             step.text, logprob=step.logprob, top_probs=step.top_probs
         )
@@ -86,7 +92,7 @@ def would_trip(scores: List[float], tau: float, run: int) -> bool:
     return False
 
 
-def main() -> int:
+async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--max-tokens", type=int, default=90)
@@ -99,10 +105,10 @@ def main() -> int:
     # Unanswerable prompts run ungrounded, which is where fabrication happens.
     pos, neg = [], []
     for q in ANSWERABLE:
-        pos.append(collect(runner, q, grounded=True, max_new_tokens=args.max_tokens))
+        pos.append(await collect(runner, q, grounded=True, max_new_tokens=args.max_tokens))
         print(f"  answerable   {len(pos[-1]):>3} tokens  {q[:52]}")
     for q in UNANSWERABLE:
-        neg.append(collect(runner, q, grounded=False, max_new_tokens=args.max_tokens))
+        neg.append(await collect(runner, q, grounded=False, max_new_tokens=args.max_tokens))
         print(f"  unanswerable {len(neg[-1]):>3} tokens  {q[:52]}")
 
     allpos = [s for run in pos for s in run]
@@ -162,4 +168,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import asyncio
+
+    sys.exit(asyncio.run(main()))

@@ -23,6 +23,7 @@ from ollama_runner import OllamaRunner
 from sentinel_stream import _NUM_RE, SentinelStream
 
 REPORT_PATH = Path(__file__).parent / "data" / "demo_evidence.json"
+MAX_NEW_TOKENS = 90
 
 # Prompts the log cannot answer. None contains a keyword the old implementation
 # matched on, so interception has to come from the model and the data.
@@ -96,8 +97,8 @@ async def main() -> int:
     print(f"Declared mean compliance cycle time: {prof['declared_avg_compliance_cycle_time_days']} days")
 
     runner = OllamaRunner()
-    protected = SentinelStream(runner=runner, retriever=None, max_new_tokens=90)
-    baseline = Ungrounded(runner=runner, retriever=None, max_new_tokens=90,
+    protected = SentinelStream(runner=runner, retriever=None, max_new_tokens=MAX_NEW_TOKENS)
+    baseline = Ungrounded(runner=runner, retriever=None, max_new_tokens=MAX_NEW_TOKENS,
                           breach_run=10**9, check_numbers=False, grounded_prompt=False)
 
     rows: List[Dict[str, Any]] = []
@@ -149,10 +150,17 @@ async def main() -> int:
         for r in rows
         if r["protected"].get("summary") and "overhead_pct" in r["protected"]["summary"]
     ]
-    saved = [
-        len(r["baseline"]["uncertainty"]) - r["protected"]["intercept"]["tokens_before_halt"]
+    # Where decoding was actually cut, against the budget it was cut from.
+    #
+    # This used to report len(baseline_tokens) - tokens_before_halt as "tokens
+    # saved". The baseline and the protected run are two independent
+    # generations that stop at their own natural lengths, so the difference
+    # measures nothing about interception and went negative whenever the
+    # baseline finished first - which is how it reported -2.
+    halted_at = [
+        r["protected"]["intercept"]["tokens_before_halt"]
         for r in unanswerable
-        if r["protected"]["intercepted"] and r.get("baseline")
+        if r["protected"]["intercepted"]
     ]
 
     print("\n" + "=" * 78)
@@ -164,8 +172,9 @@ async def main() -> int:
     print(f"False positives on answerable prompts: {false_positives}/{len(answerable)}")
     if overheads:
         print(f"Audit overhead (median)              : {statistics.median(overheads):.4f}% of decode time")
-    if saved:
-        print(f"Tokens not generated (median)        : {int(statistics.median(saved))}")
+    if halted_at:
+        print(f"Halted after (median)                : {int(statistics.median(halted_at))} "
+              f"of {MAX_NEW_TOKENS} permitted tokens")
 
     if args.json:
         REPORT_PATH.write_text(json.dumps({
@@ -178,6 +187,8 @@ async def main() -> int:
                 "false_positives": false_positives,
                 "answerable_prompts": len(answerable),
                 "median_overhead_pct": statistics.median(overheads) if overheads else None,
+                "median_halt_token": statistics.median(halted_at) if halted_at else None,
+                "max_new_tokens": MAX_NEW_TOKENS,
             },
         }, indent=2))
         print(f"\nWrote {REPORT_PATH}")

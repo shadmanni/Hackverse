@@ -147,7 +147,7 @@ class Phase4DemoRunner:
         avg_latency_ms = round(sum(all_latencies) / len(all_latencies), 2) if all_latencies else 0.0
 
         is_pitch_ready = (poison_rate == 100.0) and (grounded_rate == 100.0)
-        readiness_status = "READY FOR PITCH (100% ACCURACY)" if is_pitch_ready else "CALIBRATION REQUIRED"
+        readiness_status = "RETRIEVAL GATE CLEAN" if is_pitch_ready else "CALIBRATION REQUIRED"
 
         report = {
             "title": "Sentinel-RAG Phase 4 Pitch Demo & Run-of-Show Evaluation Report",
@@ -163,7 +163,26 @@ class Phase4DemoRunner:
                 "grounded_accuracy_rate_percent": round(grounded_rate, 2),
                 "average_pipeline_latency_ms": avg_latency_ms,
                 "circuit_breaker_tau": self.entropy_engine.tau,
-                "pitch_readiness_status": readiness_status
+                "retrieval_gate_status": readiness_status
+            },
+            # This suite exercises ONE layer: whether retrieval recognises that
+            # the store cannot answer a prompt, measured before any token is
+            # generated. It says nothing about the two layers that run during
+            # decoding - semantic entropy over live log-probabilities, and
+            # numeric grounding against celonis_metrics - because no model is
+            # invoked here. Those are measured by demo_run_of_show.py against
+            # real Granite output, and calibrate_tau.py sweeps the threshold.
+            # The previous version reported this figure as
+            # "READY FOR PITCH (100% ACCURACY)", which read as end-to-end
+            # hallucination accuracy and was never what this file measured.
+            "scope": {
+                "layer_measured": "retrieval gap detection (pre-generation)",
+                "layers_not_measured": [
+                    "semantic entropy over streamed log-probabilities",
+                    "numeric grounding of generated figures",
+                    "autonomous recovery",
+                ],
+                "end_to_end_evidence": "data/demo_evidence.json (demo_run_of_show.py)",
             },
             "poison_interception_details": poison_results,
             "grounded_retrieval_details": grounded_results
@@ -178,7 +197,9 @@ class Phase4DemoRunner:
         print(f"  Poison Prompts Intercepted : {poison_intercepted} / {total_poison} ({poison_rate:.1f}%)")
         print(f"  Grounded Queries Verified  : {grounded_verified} / {total_grounded} ({grounded_rate:.1f}%)")
         print(f"  Average Interception Time  : {avg_latency_ms} ms")
-        print(f"  Firewall Pitch Status      : {readiness_status}")
+        print(f"  Retrieval Gate Status      : {readiness_status}")
+        print( "  Scope                      : retrieval gap only; entropy + numeric layers")
+        print( "                               : are measured by demo_run_of_show.py")
         print(f"  Report Exported To         : {PHASE4_REPORT_PATH}")
         print("=" * 80 + "\n")
 

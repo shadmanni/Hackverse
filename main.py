@@ -32,14 +32,20 @@ from sentinel_stream import SentinelStream
 
 load_dotenv()
 
-# Calibrated against real granite3.3:8b log-probabilities (calibrate_tau.py).
-# Re-measured after the move from transformers/granite-3.3-2b to Ollama: the 8B
-# is more confident on the same prompts, so its per-token uncertainty sits lower
-# and the threshold had to come down with it. At run=2 this gives zero false
-# positives on answerable prompts and catches 4 of 6 unanswerable ones; tau=1.0
-# caught only 3. The rest are caught by the numeric-grounding layer, which is
-# deterministic and independent of tau.
-TAU = float(os.getenv("SENTINEL_TAU", "0.65"))
+# Calibrated against real granite3.3:8b log-probabilities (calibrate_tau.py,
+# re-run 2026-08-09 after that script was repaired - it had been iterating an
+# async generator with a plain `for` since the move to Ollama, so it could not
+# execute, and the previous tau was inherited from the transformers/granite-2b
+# runner it was measured on).
+#
+# Measured on the live model, 6 answerable vs 6 unanswerable prompts:
+#   tau=0.65 run=2 -> 1 false positive, 4/6 detected   <- the previous setting
+#   tau=0.85 run=2 -> 0 false positives, 3/6 detected  <- this one
+# A false positive halts a correct answer on stage; a miss is picked up by the
+# numeric-grounding layer, which is deterministic and independent of tau. That
+# asymmetry is why the safer threshold wins. Six prompts per class is a small
+# sample - report these as counts, never as a percentage.
+TAU = float(os.getenv("SENTINEL_TAU", "0.85"))
 WINDOW = int(os.getenv("SENTINEL_WINDOW", "5"))
 MAX_NEW_TOKENS = int(os.getenv("SENTINEL_MAX_TOKENS", "120"))
 
@@ -111,12 +117,21 @@ def sse(kind: str, **fields) -> str:
 async def health_check():
     """Reports measured state. The former 11.4 ms figure was a literal."""
     prof = cm.process_profile()
+    # Imported here, not at module scope: it pulls pymilvus and
+    # sentence-transformers, which would land on `import main` and slow every
+    # test that only touches an endpoint.
+    from phase2_ingestion_pipeline import PII_ENGINE
     return {
         "status": "NOMINAL" if _state["runner"] else "DEGRADED_NO_MODEL",
         "model": os.getenv("OLLAMA_MODEL", "granite3.3:8b"),
         "backend": "ollama",
         "model_loaded": _state["runner"] is not None,
         "retriever_loaded": _state["retriever"] is not None,
+        # Which redaction engine this process actually loaded. The UI used to
+        # assert "Data Prep Kit" unconditionally; DPK/Presidio only runs in the
+        # venv that has it installed, and claiming it otherwise is the kind of
+        # unverifiable statement this project exists to catch.
+        "pii_engine": PII_ENGINE,
         "warmup_ms": _state["load_ms"],
         "circuit_breaker_tau": TAU,
         "event_log_cases": prof["total_cases"],

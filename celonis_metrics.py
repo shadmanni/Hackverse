@@ -41,7 +41,13 @@ def process_profile(path: str = str(DATA_PATH)) -> Dict[str, Any]:
     events = list(doc["events"])
     cycles = [e["cycle_time_days"] for e in events if e.get("cycle_time_days") is not None]
     amounts = [e["amount_usd"] for e in events if e.get("amount_usd") is not None]
+    # An ORDER is a case, not an event. Counting the events kept saying "393
+    # orders above $100,000" over a log of 150 cases - a figure the system fed
+    # to Granite inside its own VERIFIED AGGREGATES block, and then accepted as
+    # grounded when the model repeated it, because 393 was in the admissible
+    # set. Both counts are exposed so a claim about either can be checked.
     high_value = [e for e in events if (e.get("amount_usd") or 0) >= HIGH_VALUE_USD]
+    high_value_cases = {e["case_id"] for e in high_value if e.get("case_id")}
     hv_cycles = [e["cycle_time_days"] for e in high_value if e.get("cycle_time_days") is not None]
 
     by_activity: Dict[str, Dict[str, float]] = {}
@@ -68,7 +74,8 @@ def process_profile(path: str = str(DATA_PATH)) -> Dict[str, Any]:
         "max_cycle_days": max(cycles) if cycles else 0,
         "mean_amount_usd": round(statistics.mean(amounts), 2) if amounts else 0.0,
         "total_amount_usd": round(sum(amounts), 2) if amounts else 0.0,
-        "high_value_orders": len(high_value),
+        "high_value_orders": len(high_value_cases),
+        "high_value_events": len(high_value),
         "high_value_mean_cycle_days": round(statistics.mean(hv_cycles), 2) if hv_cycles else 0.0,
         "by_activity": by_activity,
         "declared_avg_compliance_cycle_time_days": declared.get("avg_compliance_cycle_time_days"),
