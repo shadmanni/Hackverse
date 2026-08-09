@@ -32,6 +32,13 @@ import httpx
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 MODEL_ID = os.getenv("OLLAMA_MODEL", "granite3.3:8b")
 TOP_K = 5
+# -1 pins the weights in VRAM until Ollama is told otherwise. Overridable for
+# anyone who has to share the GPU; the demo machine should leave it alone.
+#
+# int, not str: /api/chat accepts a number of seconds or a duration string like
+# "5m", and rejects the bare string "-1" with a 400 that fails EVERY generation,
+# not just the warm-up. Read from the env it is always a string, so cast here.
+KEEP_ALIVE = int(os.getenv("OLLAMA_KEEP_ALIVE", "-1"))
 
 
 @dataclass
@@ -147,6 +154,12 @@ class OllamaRunner:
             "logprobs": True,
             "top_logprobs": top_k,
             "options": {"num_predict": max_new_tokens, "temperature": temperature},
+            # Never evict the model. Ollama's default is 5 minutes, which is
+            # exactly the length of a conversation with a judge: measured cold,
+            # the same query that answers in 0.8 s took 10.9 s, all of it
+            # reloading 5.71 GB into VRAM. The warm-up in main.py pays that cost
+            # once at startup and this keeps it paid.
+            "keep_alive": KEEP_ALIVE,
         }
         index = 0
         # A client per call, not a shared one: an AsyncClient binds to the event
