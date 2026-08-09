@@ -65,7 +65,7 @@ class SentinelStream:
         window_size: int = 5,
         check_numbers: bool = True,
         max_new_tokens: int = 160,
-        breach_run: int = 3,
+        breach_run: int = 2,
         grounded_prompt: bool = True,
     ):
         """
@@ -86,6 +86,16 @@ class SentinelStream:
             The numeric layer deliberately does NOT wait for a run: an ungrounded
             figure is a deterministic fact-check, not a noisy statistic, so one
             occurrence is conclusive.
+
+            Default of 2 comes from calibrate_tau.py against real Granite
+            log-probabilities. Answerable prompts peaked at 0.387 (p90) and 1.150
+            (max) per-token uncertainty; unanswerable reached 1.059 (p90) and
+            2.873 (max). The sweep's best separator was tau=1.25 with run=1 -
+            6/6 detected, no false positives - but that tau sits only 0.10 above
+            the answerable maximum and is fitted to six prompts. tau=1.0 with
+            run=2 requires a SUSTAINED excursion, which no answerable prompt
+            produced at all, so it generalises better at the cost of two
+            detections the numeric layer catches anyway.
         """
         self.runner = runner
         self.retriever = retriever
@@ -164,6 +174,16 @@ class SentinelStream:
         "combined", "cumulative", "per case", "on average",
     )
 
+    @staticmethod
+    def _mid_figure(text: str) -> bool:
+        """True when the text ends inside a number still being emitted."""
+        tail = text.rstrip()
+        if not tail:
+            return False
+        # "12", "12." and "12.5" are all mid-figure; a following space or letter
+        # ends it. Trailing separators count because a decimal may still arrive.
+        return tail[-1].isdigit() or (len(tail) > 1 and tail[-1] in ".," and tail[-2].isdigit())
+
     @classmethod
     def _claim_scope(cls, text: str, figure: str = "", window: int = 160) -> str:
         """'aggregate' if the claim is about a derived quantity, else 'all'."""
@@ -176,10 +196,23 @@ class SentinelStream:
         recent = text[-window:].lower()
         return "aggregate" if any(w in recent for w in cls._AGG_WORDS) else "all"
 
-    def _ungrounded_number(self, span: str, scope: str = "all") -> Optional[float]:
+    def _ungrounded_number(
+        self, span: str, scope: str = "all", metric: Optional[str] = None
+    ) -> Optional[float]:
         """First number in `span` that the event log cannot produce."""
+        # A percentage that names no metric we know cannot be grounded at all.
+        # The event log has no percentage field, so every legitimate percentage
+        # is derived from a nameable metric (the bottleneck rate). Without this,
+        # "the off-contract discount was 12%" was accepted because 12.0 is the
+        # declared order-to-cash figure - a discount validated against a count
+        # of days. There is no discount data in the log; the honest answer is
+        # that the claim is ungrounded whatever its value.
+        if "%" in span and metric is None:
+            vals = self._numbers_in(span)
+            if vals:
+                return vals[0]
         for val in self._numbers_in(span):
-            if not cm.is_grounded_number(val, scope=scope):
+            if not cm.is_grounded_number(val, scope=scope, metric=metric):
                 return val
         return None
 
@@ -203,8 +236,13 @@ class SentinelStream:
             if complete_only and (not tail or set(tail) <= {".", ","}):
                 break                      # still being emitted; check it later
             scanned_to = m.end()
+            prefix = text[:m.end()]
             val = self._ungrounded_number(
-                m.group(), scope=self._claim_scope(text[:m.end()], figure=m.group())
+                m.group(),
+                scope=self._claim_scope(prefix, figure=m.group()),
+                # If the sentence names a metric, the figure must be one of THAT
+                # metric's values, not merely some value in the log.
+                metric=cm.bound_metric(prefix),
             )
             if val is not None:
                 return val, scanned_to
@@ -273,12 +311,13 @@ class SentinelStream:
         answer = "".join(recovered).strip() or cm.ground_truth_answer(query)
         # The repaired answer is held to the same standard as the original: a
         # recovery that itself states an ungrounded figure is not a recovery.
-        residual = self._scan_new_figures(answer, 0, complete_only=False)[0]
-        if residual is not None:
+        regenerated_ok = self._scan_new_figures(answer, 0, complete_only=False)[0] is None
+        if not regenerated_ok:
             answer = cm.ground_truth_answer(query)
-            verified = False
-        else:
-            verified = True
+        # Report on the answer actually being returned, not on the draft that was
+        # discarded. Previously a clean deterministic fallback was still flagged
+        # ungrounded, because the flag described the regeneration it replaced.
+        verified = self._scan_new_figures(answer, 0, complete_only=False)[0] is None
 
         yield InterceptionEvent(
             kind="recovery",
@@ -289,7 +328,7 @@ class SentinelStream:
                 "retrieval_reason": repaired.get("reason"),
                 "regenerated": bool(recovered),
                 "all_figures_grounded": verified,
-                "fell_back_to_lookup": not verified,
+                "fell_back_to_lookup": not regenerated_ok,
             },
         )
 
@@ -340,7 +379,13 @@ class SentinelStream:
             trip_reason = None
             if ungrounded_value is not None:
                 trip_reason = "ungrounded_number"
-            elif consecutive >= self.breach_run:
+            elif consecutive >= self.breach_run and not self._mid_figure(text):
+                # A figure is being emitted right now, so the deterministic check
+                # is about to have an opinion on it. Digits are individually
+                # high-entropy, so letting the statistical layer fire first halts
+                # on "1" of "12.5" and reports semantic_entropy with no value,
+                # when one more token yields the far stronger "12.5 is not a
+                # compliance cycle time". Defer to the layer that can name it.
                 trip_reason = "semantic_entropy"
 
             if trip_reason:

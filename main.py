@@ -33,6 +33,13 @@ from sentinel_stream import SentinelStream
 
 load_dotenv()
 
+# Calibrated against real granite3.3:8b log-probabilities (calibrate_tau.py).
+# Re-measured after the move from transformers/granite-3.3-2b to Ollama: the 8B
+# is more confident on the same prompts, so its per-token uncertainty sits lower
+# and the threshold had to come down with it. At run=2 this gives zero false
+# positives on answerable prompts and catches 4 of 6 unanswerable ones; tau=1.0
+# caught only 3. The rest are caught by the numeric-grounding layer, which is
+# deterministic and independent of tau.
 TAU = float(os.getenv("SENTINEL_TAU", "0.65"))
 WINDOW = int(os.getenv("SENTINEL_WINDOW", "5"))
 MAX_NEW_TOKENS = int(os.getenv("SENTINEL_MAX_TOKENS", "120"))
@@ -54,8 +61,13 @@ def _load_models() -> None:
     """
     t0 = time.perf_counter()
     try:
-        from granite_runner import GraniteRunner
-        _state["runner"] = GraniteRunner.get()
+        # Ollama serves Granite as GGUF through llama.cpp's Metal backend. The
+        # previous transformers/MPS runner held granite-3.3-2b in bf16 at 4.7 GB
+        # on a 16 GB machine and decoded at 260-480 ms/token; a quantized 8B fits
+        # in about the same memory with ~4x the parameters. Streaming logprobs
+        # with top-k are available per chunk, which is the hard requirement.
+        from ollama_runner import OllamaRunner
+        _state["runner"] = OllamaRunner()
     except Exception as err:
         print(f"[Sentinel] Granite unavailable: {err}")
 
@@ -130,7 +142,8 @@ async def health_check():
     prof = cm.process_profile()
     return {
         "status": "NOMINAL" if _state["runner"] else "DEGRADED_NO_MODEL",
-        "model": os.getenv("GRANITE_MODEL_ID", "ibm-granite/granite-3.3-2b-instruct"),
+        "model": os.getenv("OLLAMA_MODEL", "granite3.3:8b"),
+        "backend": "ollama",
         "model_loaded": _state["runner"] is not None,
         "retriever_loaded": _state["retriever"] is not None,
         "warmup_ms": _state["load_ms"],

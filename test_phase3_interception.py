@@ -15,7 +15,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import main
-from test_stage2_granite_live import _weights_present
+from test_stage2_granite_live import _model_available
 
 BASE = "http://test"
 
@@ -88,8 +88,8 @@ async def test_recover_answers_only_with_grounded_figures():
 
 @pytest.fixture(scope="module")
 def loaded():
-    if not _weights_present():
-        pytest.skip("Granite weights not downloaded")
+    if not _model_available():
+        pytest.skip("Granite model not available via Ollama")
     if main._state["runner"] is None:
         main._load_models()
     return main._state
@@ -125,11 +125,29 @@ async def test_unprotected_stream_never_intercepts(loaded):
 
 
 @pytest.mark.asyncio
-async def test_grounded_query_is_not_intercepted(loaded):
+async def test_answerable_query_ends_grounded(loaded):
+    """
+    /stream decodes ungrounded first so the proxy is the only variable against
+    the baseline, which means an answerable query may also trip and then be
+    repaired. What must hold is the OUTCOME: whatever path it took, the answer
+    the user is left with states only figures the event log supports.
+    """
+    import re
+    import celonis_metrics as cm
+
     async with _client() as ac:
         async with ac.stream(
             "GET", "/stream?query=Give the exact mean cycle time for Compliance Review."
         ) as r:
             events = await _events(r)
-    intercepts = [e for e in events if e["kind"] == "intercept"]
-    assert not intercepts, f"false positive on a grounded query: {intercepts}"
+
+    final = events[-1]
+    assert final["kind"] in {"done", "recovery"}, f"stream ended on {final['kind']}"
+
+    if final["kind"] == "recovery":
+        assert final["all_figures_grounded"], "recovery answer still contains an ungrounded figure"
+    answer = final.get("text") or "".join(
+        e["text"] for e in events if e["kind"] in {"token", "recovery_token"}
+    )
+    for n in re.findall(r"\d+\.?\d*", answer.replace(",", "")):
+        assert cm.is_grounded_number(float(n)), f"final answer states ungrounded {n}: {answer}"

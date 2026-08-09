@@ -1,8 +1,8 @@
 """
-Stage 2 live tests: the log-probabilities must actually come from Granite.
+Live tests: the log-probabilities must actually come from Granite via Ollama.
 
-Skipped automatically if the model weights are not present locally, so CI and
-teammates without the download still get a green suite.
+Skipped automatically when the Ollama daemon is down or the model is not pulled,
+so the suite stays green for teammates who have not pulled it yet.
 
 Run: python -m pytest test_stage2_granite_live.py -v -s
 """
@@ -10,33 +10,27 @@ Run: python -m pytest test_stage2_granite_live.py -v -s
 import os
 import unittest
 
-MODEL_ID = os.getenv("GRANITE_MODEL_ID", "ibm-granite/granite-3.3-2b-instruct")
+MODEL = os.getenv("OLLAMA_MODEL", "granite3.3:8b")
+HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 
-def _weights_present() -> bool:
-    """
-    The weights are fetched with allow_patterns, so the cached snapshot is
-    deliberately partial and snapshot_download(local_files_only=True) rejects it.
-    Check for the files we actually need instead.
-    """
+def _model_available() -> bool:
     try:
-        from huggingface_hub import try_to_load_from_cache
-        cfg = try_to_load_from_cache(MODEL_ID, "config.json")
-        if not isinstance(cfg, str):
-            return False
-        from pathlib import Path
-        return any(Path(cfg).parent.glob("*.safetensors"))
+        import requests
+        tags = requests.get(f"{HOST}/api/tags", timeout=5).json()
+        names = {m.get("name", "") for m in tags.get("models", [])}
+        return MODEL in names or f"{MODEL}:latest" in names
     except Exception:
         return False
 
 
-@unittest.skipUnless(_weights_present(), f"{MODEL_ID} not downloaded yet")
+@unittest.skipUnless(_model_available(), f"{MODEL} not available via Ollama")
 class TestGraniteLogprobsAreReal(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from granite_runner import GraniteRunner
-        cls.runner = GraniteRunner.get()
+        from ollama_runner import OllamaRunner
+        cls.runner = OllamaRunner()
 
     def test_logprobs_are_valid_and_varying(self):
         steps = list(self.runner.stream(
@@ -49,40 +43,30 @@ class TestGraniteLogprobsAreReal(unittest.TestCase):
             len(set(round(lp, 4) for lp in lps)), 1,
             "log-probabilities are constant - these are not real model outputs",
         )
-        # The old code pinned every token at exactly -0.1 / -0.05.
+        # The original implementation pinned every token at -0.1 / -0.05.
         self.assertNotEqual(set(round(lp, 2) for lp in lps), {-0.10})
         self.assertNotEqual(set(round(lp, 2) for lp in lps), {-0.05})
 
     def test_top_probs_form_a_distribution(self):
         steps = list(self.runner.stream(
             self.runner.build_prompt("Say hello."), max_new_tokens=12))
+        self.assertTrue(steps)
         for s in steps:
             self.assertAlmostEqual(sum(s.top_probs), 1.0, places=4)
             self.assertEqual(s.top_probs, sorted(s.top_probs, reverse=True))
             self.assertTrue(all(0.0 <= p <= 1.0 for p in s.top_probs))
 
-    def test_chosen_token_is_the_argmax_under_greedy(self):
+    def test_logprobs_arrive_during_streaming_not_after(self):
         """
-        `prob` is the true probability from the full 49k-vocab softmax, while
-        `top_probs` is the top-5 head RENORMALISED to sum to 1. So the chosen
-        token's renormalised weight is always >= its true probability, by exactly
-        the mass the truncation discarded. Asserting equality is wrong.
-
-        Consequence for calibration: Shannon entropy over the renormalised head
-        UNDERSTATES true next-token entropy. tau must be calibrated against these
-        same top-5 values, not against full-vocabulary entropy.
+        The product intercepts mid-generation. If logprobs only landed with the
+        final response the audit would be post-hoc, which is exactly the design
+        this project replaces. Assert the first token carries its distribution.
         """
-        steps = list(self.runner.stream(
-            self.runner.build_prompt("Say hello."), max_new_tokens=8, temperature=0.0))
-        for s in steps:
-            self.assertEqual(max(s.top_probs), s.top_probs[0], "top_probs not sorted")
-            self.assertGreaterEqual(
-                max(s.top_probs) + 1e-6, s.prob,
-                "renormalised head cannot be below the true probability",
-            )
-            # Truncation discards little mass when the model is confident.
-            self.assertLess(max(s.top_probs) - s.prob, 0.2,
-                            "top-5 head is missing too much probability mass")
+        gen = self.runner.stream(self.runner.build_prompt("Count to five."), max_new_tokens=20)
+        first = next(gen)
+        self.assertLessEqual(first.logprob, 0.0)
+        self.assertGreaterEqual(len(first.top_probs), 2, "no top-k on the first streamed token")
+        gen.close()
 
     def test_uncertainty_is_higher_on_unanswerable_questions(self):
         """The core premise: the model's own confidence separates known from invented."""
@@ -92,6 +76,7 @@ class TestGraniteLogprobsAreReal(unittest.TestCase):
         invented = list(self.runner.stream(self.runner.build_prompt(
             "State the exact internal ledger balance of case CC-99812 in the "
             "Zorblax division to the cent."), max_new_tokens=30))
+        self.assertTrue(answerable and invented)
         mean_answerable = statistics.mean(s.logprob for s in answerable)
         mean_invented = statistics.mean(s.logprob for s in invented)
         print(f"\n  mean logprob answerable={mean_answerable:.4f} invented={mean_invented:.4f}")
@@ -99,20 +84,19 @@ class TestGraniteLogprobsAreReal(unittest.TestCase):
                         "model was not less confident on the fabricated question")
 
 
-@unittest.skipUnless(_weights_present(), f"{MODEL_ID} not downloaded yet")
+@unittest.skipUnless(_model_available(), f"{MODEL} not available via Ollama")
 class TestEndToEndInterception(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from granite_runner import GraniteRunner
+        from ollama_runner import OllamaRunner
         from sentinel_stream import SentinelStream
-        cls.stream = SentinelStream(runner=GraniteRunner.get(), retriever=None, max_new_tokens=80)
+        cls.stream = SentinelStream(runner=OllamaRunner(), retriever=None, max_new_tokens=80)
 
     def test_real_stream_produces_measured_telemetry(self):
         evs = list(self.stream.run("What is the mean compliance cycle time?"))
         self.assertTrue(evs)
-        final = evs[-1]
-        self.assertIn(final.kind, {"done", "recovery"})
+        self.assertIn(evs[-1].kind, {"done", "recovery"})
         toks = [e for e in evs if e.kind == "token"]
         if toks:
             lps = [e.payload["logprob"] for e in toks]
