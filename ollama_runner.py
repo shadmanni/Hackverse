@@ -1,15 +1,15 @@
 """
-Ollama decoding via Ollama and AsyncOpenAI client, with real streaming log-probabilities.
+Ollama decoding via the openai.AsyncOpenAI client, with real per-token log-probabilities.
 
-Implements the async stream interface using openai.AsyncOpenAI.
-Maps the Primary Stream to granite3-dense:8b and K-Path Sampler to granite3-dense:2b,
-running them concurrently using asyncio.gather().
+Single-stream design: only the primary model (granite3-dense:8b) is called per request.
+The K-Path Sampler was removed — Ollama is serial by default so concurrent requests
+queue behind the primary and roughly double decode latency with no benefit.
 """
 
 import json
 import math
 import os
-import asyncio
+
 import requests
 from typing import AsyncIterator, List, Optional, Dict, Any
 
@@ -21,7 +21,7 @@ TOP_K = 5
 
 
 class OllamaRunner:
-    """Ollama AsyncOpenAI runner, backing both primary and K-path streams."""
+    """Ollama AsyncOpenAI runner — single primary stream, no K-path sampler."""
 
     def __init__(self, model: str = MODEL_ID, host: str = OLLAMA_HOST):
         from openai import AsyncOpenAI
@@ -78,12 +78,17 @@ class OllamaRunner:
         top_k: int = TOP_K,
     ) -> AsyncIterator[TokenStep]:
         """
-        Triggers both the Primary Stream and K-Path Sampler concurrently, yielding TokenSteps from the Primary.
+        Stream tokens directly from the primary model with no secondary sampler.
+
+        The K-Path Sampler (concurrent 2b request) was removed: Ollama is serial
+        by default, so a second concurrent request queues behind the primary and
+        creates back-pressure that roughly doubles decode latency. The sampler
+        output was discarded anyway (async for _ in stream: pass), so removing it
+        costs nothing and cuts first-token latency significantly.
         """
-        # Resolve messages list format
+        # Resolve messages format (JSON envelope from legacy build_prompt or plain list)
         if isinstance(prompt, str):
             try:
-                # If it was build_prompt from legacy or test, try to parse JSON
                 envelope = json.loads(prompt)
                 messages = [
                     {"role": "system", "content": envelope.get("system", "")},
@@ -101,82 +106,42 @@ class OllamaRunner:
             max_completion_tokens=max_new_tokens,
             stream=True,
             logprobs=True,
-            top_logprobs=top_k
+            top_logprobs=top_k,
         )
 
-        queue = asyncio.Queue()
+        step_idx = 0
+        async for chunk in primary_stream:
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            logprobs_data = choice.logprobs
 
-        async def consume_primary():
-            try:
-                step_idx = 0
-                async for chunk in primary_stream:
-                    if not chunk.choices:
-                        continue
-                    choice = chunk.choices[0]
-                    delta = choice.delta
-                    logprobs_data = choice.logprobs
+            text = (choice.delta.content or "")
+            if not text and not logprobs_data:
+                continue
 
-                    text = delta.content or ""
-                    if not text and not logprobs_data:
-                        continue
+            logprob_val = 0.0
+            top_probs = [1.0]
+            top_tokens = [text]
 
-                    logprob_val = 0.0
-                    top_probs = [1.0]
-                    top_tokens = [text]
+            if logprobs_data and logprobs_data.content:
+                lp_item = logprobs_data.content[0]
+                text = lp_item.token
+                logprob_val = lp_item.logprob
+                if lp_item.top_logprobs:
+                    raw_probs = [math.exp(t.logprob) for t in lp_item.top_logprobs]
+                    total = sum(raw_probs)
+                    top_probs = [p / total for p in raw_probs] if total > 0 else raw_probs
+                    top_tokens = [t.token for t in lp_item.top_logprobs]
 
-                    if logprobs_data and logprobs_data.content:
-                        lp_item = logprobs_data.content[0]
-                        text = lp_item.token
-                        logprob_val = lp_item.logprob
-                        if lp_item.top_logprobs:
-                            raw_probs = [math.exp(t.logprob) for t in lp_item.top_logprobs]
-                            sum_p = sum(raw_probs)
-                            if sum_p > 0:
-                                top_probs = [p / sum_p for p in raw_probs]
-                            else:
-                                top_probs = raw_probs
-                            top_tokens = [t.token for t in lp_item.top_logprobs]
-
-                    step = TokenStep(
-                        text=text,
-                        logprob=logprob_val,
-                        top_probs=top_probs,
-                        top_tokens=top_tokens,
-                        index=step_idx,
-                    )
-                    await queue.put(step)
-                    step_idx += 1
-            except Exception as e:
-                print(f"[OllamaRunner] Primary stream consumption error: {e}")
-            finally:
-                await queue.put(None)
-
-        async def consume_sampler():
-            try:
-                sampler_stream = await self.client.chat.completions.create(
-                    model=self.sampler_model,
-                    messages=messages,
-                    temperature=0.7,
-                    max_completion_tokens=max_new_tokens,
-                    stream=True,
-                    logprobs=True,
-                    top_logprobs=top_k
-                )
-                async for _ in sampler_stream:
-                    pass
-            except Exception as e:
-                print(f"[OllamaRunner] K-Path Sampler stream error: {e}")
-
-        async def run_gather():
-            await asyncio.gather(consume_primary(), consume_sampler())
-
-        asyncio.create_task(run_gather())
-
-        while True:
-            item = await queue.get()
-            if item is None:
-                break
-            yield item
+            yield TokenStep(
+                text=text,
+                logprob=logprob_val,
+                top_probs=top_probs,
+                top_tokens=top_tokens,
+                index=step_idx,
+            )
+            step_idx += 1
 
     def unconditioned_logprob(self, token_text: str, partial: str) -> Optional[float]:
         return None
