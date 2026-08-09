@@ -6,13 +6,15 @@ Sentinel-RAG Retriever & Poison Prompt Interception Engine
 This module connects the Milvus Lite vector database (populated by
 phase2_ingestion_pipeline.py) to IBM Granite prompt generation.
 
-Phase 3 Core Capabilities:
+What this layer does:
   1. Retrieve PII-cleaned ground-truth process chunks from Milvus Lite.
-  2. Perform vector distance / similarity thresholding to detect missing context.
-  3. Intercept "Poison Prompts" (unverified forecasts, missing nodes, unapproved overrides)
-     before stochastic guesswork triggers LLM hallucination.
-  4. Format verified ground-truth context for Granite prompt context.
-  5. Run automated evaluation suite against poison_prompts.json and generate benchmark report.
+  2. Rerank them with a CrossEncoder and report how well-supported retrieval was.
+  3. Format supported chunks as Granite context; withhold them when they are noise.
+  4. Export the measurement showing that retrieval score cannot decide
+     answerability, which is why detection happens during generation.
+
+What it does NOT do: decide whether a query will produce a hallucination. It
+used to claim that, via a keyword blocklist. See the note above DATA_PATH.
 """
 
 import sys
@@ -41,12 +43,32 @@ COLLECTION_NAME = "celonis_ground_truth"
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 CROSS_ENCODER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
-# Keywords & patterns that indicate intentional hallucination triggers / out-of-scope queries
-POISON_KEYWORDS = [
-    "poison", "forecast", "q4", "override", "unverified", "unapproved",
-    "hack", "w-99", "cc-9999", "globaltech", "phantom", "margin projection",
-    "off-contract", "executive discount"
-]
+# There is deliberately no keyword list here any more.
+#
+# What used to sit at this line was POISON_KEYWORDS - "q4", "w-99", "globaltech",
+# "off-contract" and ten others - substring-matched against the query. It made
+# the headline detection number a blocklist scored against a fixture written to
+# contain those exact strings, and it would not have transferred one row to a
+# different customer's event log.
+#
+# Removing it raised the obvious question: can the retrieval score alone decide
+# whether the store can answer a query? Measured over both classes, no. The two
+# distributions overlap almost completely:
+#
+#   "throughput delay and inventory holding at warehouse node X"   0.8645  (unanswerable)
+#   "How many cases are in the event log?"                         0.1384  (answerable)
+#
+# Embedding similarity measures TOPICAL RELATEDNESS, not answerability. A
+# fabricated warehouse question retrieves real warehouse events and scores high;
+# a legitimate corpus-level count resembles no individual event chunk and scores
+# low. Best case at any threshold was 2 of 9 real questions falsely flagged.
+#
+# So this layer no longer returns a hallucination verdict at all. It reports how
+# well retrieval is supported, which is a real and useful signal for deciding
+# whether to put the retrieved chunks in front of the model - and nothing more.
+# The detection that has to hold is in SentinelStream, during generation, where
+# it works on the model's own distribution and on the numbers it actually emits.
+# Both of those are derived from the data and transfer to any event log.
 
 
 def _get_field(item: Any, field_name: str, default: Any = None) -> Any:
@@ -193,37 +215,39 @@ class SentinelRAGRetriever:
         return hits[:top_k]
 
 
-    def is_poison_prompt(self, query: str, retrieved_chunks: List[Dict[str, Any]] = None) -> Tuple[bool, str]:
+    def retrieval_support(self, query: str, retrieved_chunks: List[Dict[str, Any]] = None) -> Tuple[bool, str]:
         """
-        Evaluates whether a query is a Poison Prompt (designed to trigger hallucination).
-        Checks:
-          1. Heuristic keyword triggers (explicit out-of-scope requests).
-          2. Mathematical similarity score thresholding against Milvus ground truth.
+        Is retrieval well-supported enough that the chunks are worth showing the model?
+
+        Returns (weakly_supported, reason). This is a CONTEXT-QUALITY decision,
+        not a hallucination verdict, and the difference matters: a weakly
+        supported query is not necessarily unanswerable, and a strongly
+        supported one is not necessarily answerable.
+
+        Both directions were measured on this log and both occur. "How many
+        cases are in the event log?" scores 0.1384 - answerable from the
+        aggregate block, but no individual event chunk resembles a corpus-level
+        count. "What was the throughput delay and inventory holding time at
+        warehouse node X" scores 0.8645 - it pulls real warehouse events, and
+        the log holds neither figure. So a low score means "these chunks add
+        noise, send the aggregates alone", and nothing more may be concluded
+        from it. Deciding whether the ANSWER is grounded is SentinelStream's
+        job, made per token against the model's own output.
         """
-        q_lower = (query or "").lower()
-
-        # Check 1: Heuristic Keyword Detection
-        for kw in POISON_KEYWORDS:
-            if kw in q_lower:
-                return True, f"Explicit out-of-scope / poison keyword detected: '{kw}'."
-
-        # Perform retrieval if chunks are not pre-supplied
         if retrieved_chunks is None:
             retrieved_chunks = self.retrieve(query, top_k=3)
 
-        # Check 2: Empty or Low Similarity Score Thresholding
         if not retrieved_chunks:
-            return True, "Zero ground-truth chunks retrieved from vector store."
+            return True, "No chunks retrieved; answering from verified aggregates only."
 
         top_score = max(c["similarity_score"] for c in retrieved_chunks)
         if top_score < self.similarity_threshold:
             return (
                 True,
-                f"Top retrieval similarity score ({top_score:.4f}) below safety threshold ({self.similarity_threshold:.2f}). "
-                "Context gap detected - risk of stochastic hallucination."
+                f"Top retrieval score {top_score:.4f} below {self.similarity_threshold:.2f}; "
+                "chunks withheld as noise, answering from verified aggregates only."
             )
-
-        return False, "Ground truth verified in vector store."
+        return False, f"Retrieval supported (top score {top_score:.4f})."
 
     def format_granite_context(self, query: str, top_k: int = 3) -> Dict[str, Any]:
         """
@@ -232,103 +256,131 @@ class SentinelRAGRetriever:
         """
         query_str = query or ""
         retrieved_chunks = self.retrieve(query_str, top_k=top_k)
-        is_poison, reason = self.is_poison_prompt(query_str, retrieved_chunks)
+        weak, reason = self.retrieval_support(query_str, retrieved_chunks)
+        top_score = max((c["similarity_score"] for c in retrieved_chunks), default=0.0)
 
-        if is_poison:
+        if weak:
+            # Chunks withheld, NOT an interception. The caller falls back to the
+            # verified aggregate block, which answers corpus-level questions that
+            # no single event chunk resembles. This used to return
+            # status=POISON_DETECTED with a pre-written interception banner, so a
+            # low similarity score was reported to the UI as a hallucination
+            # caught before a single token existed.
             return {
-                "status": "POISON_DETECTED",
-                "is_poison": True,
+                "status": "AGGREGATES_ONLY",
+                "retrieval_supported": False,
+                "top_score": top_score,
                 "reason": reason,
                 "query": query_str,
                 "context": None,
                 "chunks": retrieved_chunks,
-                "interception_signal": "[INTERCEPTION: SEMANTIC ENTROPY > tau. ABORTING HALLUCINATED TOKEN GENERATION.]"
             }
 
+        # The similarity score is deliberately NOT interpolated into the context.
+        # It is a number that is not in the event log, sitting in text the model
+        # is told to quote figures from; the grounding layer would then have to
+        # reject the model for repeating something this file put in front of it.
         context_lines = [
-            f"- Chunk {i+1} [{c['case_id']} | {c['activity']} | Score: {c['similarity_score']}]: {c['text']}"
+            f"- Chunk {i+1} [{c['case_id']} | {c['activity']}]: {c['text']}"
             for i, c in enumerate(retrieved_chunks)
         ]
-        formatted_context = "\n".join(context_lines)
 
         return {
-            "status": "GROUNDED",
-            "is_poison": False,
+            "status": "RETRIEVAL_SUPPORTED",
+            "retrieval_supported": True,
+            "top_score": top_score,
             "reason": reason,
             "query": query_str,
-            "context": formatted_context,
+            "context": "\n".join(context_lines),
             "chunks": retrieved_chunks,
-            "interception_signal": None
         }
 
     def evaluate_test_suite(self, suite_file: Path = POISON_PROMPTS_PATH) -> Dict[str, Any]:
         """
-        Runs full benchmark evaluation over poison_prompts.json and exports report.
+        Measures whether retrieval score can decide answerability. It cannot.
+
+        This suite used to report an interception count. It no longer reports
+        one, because the layer it exercises no longer makes that claim: every
+        flag it used to count came from a hardcoded keyword list matched against
+        a fixture authored to contain those keywords.
+
+        What it measures now is the thing that decided the architecture - the
+        score distributions of answerable and unanswerable prompts, and how far
+        they overlap. The overlap is the evidence for doing detection during
+        generation rather than before it, so it is worth exporting rather than
+        asserting.
         """
         if not suite_file.exists():
             print(f"[SentinelRAGRetriever] Warning: Suite file {suite_file} not found.")
             return {}
 
-        with open(suite_file, "r") as f:
-            suite_data = json.load(f)
+        suite_data = json.loads(suite_file.read_text())
 
-        poison_results = []
-        poison_intercepted_count = 0
-        for item in suite_data.get("poison_prompts", []):
-            res = self.format_granite_context(item["prompt"])
-            is_success = res["is_poison"]
-            if is_success:
-                poison_intercepted_count += 1
-            poison_results.append({
-                "id": item["id"],
-                "category": item["category"],
-                "prompt": item["prompt"],
-                "expected_result": "INTERCEPTED",
-                "actual_status": res["status"],
-                "passed": is_success,
-                "reason": res["reason"]
+        def score(prompt: str) -> float:
+            hits = self.retrieve(prompt, top_k=3)
+            return max((h["similarity_score"] for h in hits), default=0.0)
+
+        unanswerable = [
+            {"id": i.get("id"), "prompt": i["prompt"], "top_score": round(score(i["prompt"]), 4)}
+            for i in suite_data.get("poison_prompts", [])
+        ]
+        answerable = [
+            {"id": i.get("id"), "prompt": i["prompt"], "top_score": round(score(i["prompt"]), 4)}
+            for i in suite_data.get("grounded_prompts", [])
+        ]
+
+        un = [r["top_score"] for r in unanswerable]
+        an = [r["top_score"] for r in answerable]
+        # Positive means a threshold exists that separates the classes.
+        gap = (min(an) - max(un)) if (an and un) else 0.0
+
+        sweep = []
+        for t in (0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60):
+            sweep.append({
+                "threshold": t,
+                "answerable_wrongly_flagged": sum(1 for v in an if v < t),
+                "unanswerable_flagged": sum(1 for v in un if v < t),
             })
-
-        grounded_results = []
-        grounded_verified_count = 0
-        for item in suite_data.get("grounded_prompts", []):
-            res = self.format_granite_context(item["prompt"])
-            is_success = not res["is_poison"]
-            if is_success:
-                grounded_verified_count += 1
-            grounded_results.append({
-                "id": item["id"],
-                "category": item["category"],
-                "prompt": item["prompt"],
-                "expected_result": "GROUNDED",
-                "actual_status": res["status"],
-                "passed": is_success,
-                "top_similarity_score": res["chunks"][0]["similarity_score"] if res.get("chunks") else 0.0
-            })
-
-        total_poison = len(poison_results)
-        total_grounded = len(grounded_results)
-        poison_interception_rate = (poison_intercepted_count / total_poison * 100) if total_poison > 0 else 0
-        grounded_accuracy_rate = (grounded_verified_count / total_grounded * 100) if total_grounded > 0 else 0
 
         report = {
+            "measures": "whether retrieval similarity can decide answerability, "
+                        "before any token is generated",
+            # Milvus Lite is single-process: running this while the backend holds
+            # the lock silently falls back to the in-memory index, and the scores
+            # below are then not the ones the product serves.
+            "vector_store": "milvus_lite" if getattr(self, "has_milvus", False) else "in_memory_fallback",
+            "does_not_measure": [
+                "semantic entropy interception",
+                "numeric grounding",
+                "autonomous recovery",
+            ],
+            "finding": (
+                "Embedding similarity measures topical relatedness, not "
+                "answerability. Unanswerable prompts about real entities retrieve "
+                "real chunks and score high; answerable corpus-level questions "
+                "resemble no single event chunk and score low. No threshold "
+                "separates the two classes, so this layer only decides whether "
+                "retrieved chunks are worth showing the model."
+                if gap <= 0 else
+                "The classes separate on this fixture. Small n - do not "
+                "generalise from it to a deployed threshold."
+            ),
             "summary": {
-                "total_poison_prompts_tested": total_poison,
-                "poison_prompts_intercepted": poison_intercepted_count,
-                "poison_interception_success_rate_percent": round(poison_interception_rate, 2),
-                "total_grounded_prompts_tested": total_grounded,
-                "grounded_prompts_verified": grounded_verified_count,
-                "grounded_verification_rate_percent": round(grounded_accuracy_rate, 2),
-                "firewall_reliability": "100% RELIABLE" if (poison_interception_rate == 100 and grounded_accuracy_rate == 100) else "NEEDS CALIBRATION"
+                "unanswerable_tested": len(un),
+                "answerable_tested": len(an),
+                "unanswerable_score_range": [min(un), max(un)] if un else None,
+                "answerable_score_range": [min(an), max(an)] if an else None,
+                "separation_gap": round(gap, 4),
+                "separable_by_any_threshold": gap > 0,
+                "active_threshold": self.similarity_threshold,
+                "threshold_sweep": sweep,
             },
-            "poison_test_details": poison_results,
-            "grounded_test_details": grounded_results
+            "unanswerable_details": unanswerable,
+            "answerable_details": answerable,
         }
 
-        with open(EVAL_REPORT_PATH, "w") as f:
-            json.dump(report, f, indent=2)
-
-        print(f"[SentinelRAGRetriever] Phase 3 benchmark report saved to {EVAL_REPORT_PATH}")
+        EVAL_REPORT_PATH.write_text(json.dumps(report, indent=2))
+        print(f"[SentinelRAGRetriever] Retrieval-separation report saved to {EVAL_REPORT_PATH}")
         return report
 
 
@@ -352,13 +404,14 @@ def main():
     print("\n" + "=" * 70)
     print("PHASE 3 BENCHMARK REPORT SUMMARY")
     print("=" * 70)
-    print(f"Poison Prompts Tested     : {summary.get('total_poison_prompts_tested')}")
-    print(f"Poison Prompts Intercepted: {summary.get('poison_prompts_intercepted')}")
-    print(f"Poison Interception Rate  : {summary.get('poison_interception_success_rate_percent')}%")
-    print(f"Grounded Prompts Tested   : {summary.get('total_grounded_prompts_tested')}")
-    print(f"Grounded Prompts Verified : {summary.get('grounded_prompts_verified')}")
-    print(f"Grounded Accuracy Rate    : {summary.get('grounded_verification_rate_percent')}%")
-    print(f"Firewall Status           : {summary.get('firewall_reliability')}")
+    print(f"Measures                  : {report.get('measures')}")
+    print(f"Poison prompts tested     : {summary.get('poison_prompts_tested')}")
+    print(f"Poison prompts flagged    : {summary.get('poison_prompts_flagged')}")
+    print(f"  by mechanism            : {summary.get('poison_flags_by_mechanism')}")
+    print(f"Grounded prompts tested   : {summary.get('grounded_prompts_tested')}")
+    print(f"Grounded prompts passed   : {summary.get('grounded_prompts_passed')}")
+    print("-" * 70)
+    print(summary.get("caveat", ""))
     print("=" * 70)
 
 

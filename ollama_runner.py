@@ -103,7 +103,18 @@ class OllamaRunner:
                 "event-log context. Every figure you state must appear in the context. "
                 "Prefer the pre-computed aggregates when the question asks for one; do not "
                 "recompute them from individual cases. If the context does not contain the "
-                "answer, say you cannot verify it."
+                "answer, say you cannot verify it. "
+                # Answer, then stop. Without this the model appends a citation -
+                # "This information is provided in the RETRIEVED EVENT CHUNKS
+                # section under..." - and that trailing clause is legitimately
+                # high-entropy: there are many ways to word it and the model is
+                # genuinely unsure which section name to use. It tripped the
+                # entropy layer at token 30 on an answer that was correct and
+                # complete at token 12. The uncertainty was real; it just was not
+                # about the fact. Suppressing the filler removes the
+                # false-positive surface at its source rather than by raising tau.
+                "Answer in one short sentence stating the figure. Do not explain "
+                "where in the context you found it."
             )
             user = f"Context from Celonis event log:\n{context}\n\nQuestion: {query}"
         else:

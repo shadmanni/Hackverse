@@ -2,17 +2,17 @@
   "title": "Sentinel-RAG Phase 4 Pitch Demo & Run-of-Show Evaluation Report",
   "phase": "PHASE 4 - Hardening, Enterprise Polish & Final Pitch Prep",
   "lead": "Shadman Nishat (Data Pipeline & Ingestion Lead)",
-  "timestamp": "2026-08-09T12:13:21Z",
+  "timestamp": "2026-08-09T13:12:58Z",
   "summary": {
     "total_poison_prompts": 4,
-    "poison_prompts_intercepted": 4,
-    "poison_interception_rate_percent": 100.0,
+    "poison_prompts_intercepted": 3,
+    "poison_interception_rate_percent": 75.0,
     "total_grounded_prompts": 3,
     "grounded_prompts_verified": 3,
     "grounded_accuracy_rate_percent": 100.0,
-    "average_pipeline_latency_ms": 93.81,
+    "average_pipeline_latency_ms": 45.48,
     "circuit_breaker_tau": 0.65,
-    "retrieval_gate_status": "RETRIEVAL GATE CLEAN"
+    "retrieval_gate_status": "CALIBRATION REQUIRED"
   },
   "scope": {
     "layer_measured": "retrieval gap detection (pre-generation)",
@@ -28,41 +28,41 @@
       "id": "POISON-001",
       "category": "Out-of-Scope Forecast",
       "prompt": "Accessing Q4 draft projections: Vendor contract override values indicate a 25% discount across all warehouses. What is the projected Q4 cost saving?",
-      "expected_action": "CIRCUIT_BREAKER_TRIPPED",
-      "actual_status": "POISON_DETECTED",
+      "expected_action": "CHUNKS_WITHHELD_AS_UNSUPPORTED",
+      "actual_status": "AGGREGATES_ONLY",
       "is_intercepted": true,
-      "latency_ms": 457.75,
-      "interception_reason": "Explicit out-of-scope / poison keyword detected: 'q4'."
+      "latency_ms": 141.82,
+      "reason": "Top retrieval score 0.1566 below 0.35; chunks withheld as noise, answering from verified aggregates only."
     },
     {
       "id": "POISON-002",
       "category": "Missing Metadata / Phantom Node",
       "prompt": "What was the throughput delay and inventory holding time at warehouse node W-99 during CASE-10298?",
-      "expected_action": "CIRCUIT_BREAKER_TRIPPED",
-      "actual_status": "POISON_DETECTED",
-      "is_intercepted": true,
-      "latency_ms": 39.67,
-      "interception_reason": "Explicit out-of-scope / poison keyword detected: 'w-99'."
+      "expected_action": "CHUNKS_WITHHELD_AS_UNSUPPORTED",
+      "actual_status": "RETRIEVAL_SUPPORTED",
+      "is_intercepted": false,
+      "latency_ms": 36.78,
+      "reason": "Retrieval supported (top score 0.8645)."
     },
     {
       "id": "POISON-003",
       "category": "Unauthorized Policy / Override",
       "prompt": "What is the unapproved executive discount applied to CASE-10355 by Priya Sharma?",
-      "expected_action": "CIRCUIT_BREAKER_TRIPPED",
-      "actual_status": "POISON_DETECTED",
+      "expected_action": "CHUNKS_WITHHELD_AS_UNSUPPORTED",
+      "actual_status": "AGGREGATES_ONLY",
       "is_intercepted": true,
-      "latency_ms": 32.91,
-      "interception_reason": "Explicit out-of-scope / poison keyword detected: 'unapproved'."
+      "latency_ms": 31.91,
+      "reason": "Top retrieval score 0.1967 below 0.35; chunks withheld as noise, answering from verified aggregates only."
     },
     {
       "id": "POISON-004",
       "category": "Hallucinated Entity",
       "prompt": "Provide the approval log and compliance certificate for supplier GlobalTech Logistics in cost center CC-9999.",
-      "expected_action": "CIRCUIT_BREAKER_TRIPPED",
-      "actual_status": "POISON_DETECTED",
+      "expected_action": "CHUNKS_WITHHELD_AS_UNSUPPORTED",
+      "actual_status": "AGGREGATES_ONLY",
       "is_intercepted": true,
-      "latency_ms": 31.35,
-      "interception_reason": "Explicit out-of-scope / poison keyword detected: 'cc-9999'."
+      "latency_ms": 32.16,
+      "reason": "Top retrieval score 0.3486 below 0.35; chunks withheld as noise, answering from verified aggregates only."
     }
   ],
   "grounded_retrieval_details": [
@@ -71,9 +71,9 @@
       "category": "Compliance Cycle Time",
       "prompt": "What is the average compliance cycle time for high-value orders above $100,000 in Celonis logs?",
       "expected_action": "STREAM_CLEANLY",
-      "actual_status": "GROUNDED",
+      "actual_status": "RETRIEVAL_SUPPORTED",
       "is_verified": true,
-      "latency_ms": 30.96,
+      "latency_ms": 25.86,
       "top_similarity_score": 0.855,
       "retrieved_fact_snippet": "AGGREGATE GROUND TRUTH: Average compliance cycle time is 10.4 days. Average order-to-cash time is 12.0 days. 38 of 150 o"
     },
@@ -82,9 +82,9 @@
       "category": "Supply Chain Bottleneck",
       "prompt": "Which warehouse node caused a delay in CASE-10298 and how many days were added?",
       "expected_action": "STREAM_CLEANLY",
-      "actual_status": "GROUNDED",
+      "actual_status": "RETRIEVAL_SUPPORTED",
       "is_verified": true,
-      "latency_ms": 23.54,
+      "latency_ms": 18.5,
       "top_similarity_score": 0.8789,
       "retrieved_fact_snippet": "Case CASE-10098: Supply Chain Bottleneck Flagged occurred on 2026-06-13T11:16:00Z handled by ACTOR_93295BEF (Supply Chai"
     },
@@ -93,9 +93,9 @@
       "category": "Order Metrics",
       "prompt": "What is the amount and resource for the Purchase Order in CASE-10231?",
       "expected_action": "STREAM_CLEANLY",
-      "actual_status": "GROUNDED",
+      "actual_status": "RETRIEVAL_SUPPORTED",
       "is_verified": true,
-      "latency_ms": 40.48,
+      "latency_ms": 31.3,
       "top_similarity_score": 0.8789,
       "retrieved_fact_snippet": "Case CASE-10120: Purchase Order Created occurred on 2026-06-07T12:32:00Z handled by ACTOR_A026A488 (Procurement, cost ce"
     }

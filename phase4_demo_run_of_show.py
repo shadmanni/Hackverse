@@ -67,7 +67,7 @@ class Phase4DemoRunner:
         # -----------------------------------------------------------------
         # PART 1: Poison Prompt Interception (Hallucination Triggers)
         # -----------------------------------------------------------------
-        print("[STAGE 1] Testing Poison Prompts (Firewall Interception Suite)...")
+        print("[STAGE 1] Retrieval support for unanswerable prompts...")
         poison_prompts = suite_data.get("poison_prompts", [])
         poison_results = []
         poison_intercepted = 0
@@ -77,11 +77,13 @@ class Phase4DemoRunner:
             retrieval_res = self.retriever.format_granite_context(item["prompt"])
             t_elapsed_ms = round((time.perf_counter() - t_start) * 1000, 2)
 
-            is_intercepted = retrieval_res["is_poison"]
+            # Retrieval reported its chunks unusable. NOT an interception:
+            # nothing has been generated yet, so nothing has been intercepted.
+            is_intercepted = not retrieval_res["retrieval_supported"]
             if is_intercepted:
                 poison_intercepted += 1
 
-            status_symbol = "[INTERCEPTED]" if is_intercepted else "[FAILED: UNPROTECTED]"
+            status_symbol = "[UNSUPPORTED]" if is_intercepted else "[retrieval supported]"
             print(f"  [{i}/{len(poison_prompts)}] {item['id']} ({item['category']}): {status_symbol} in {t_elapsed_ms}ms")
             print(f"      Prompt: \"{item['prompt']}\"")
             print(f"      Reason: {retrieval_res['reason']}\n")
@@ -90,11 +92,11 @@ class Phase4DemoRunner:
                 "id": item["id"],
                 "category": item["category"],
                 "prompt": item["prompt"],
-                "expected_action": "CIRCUIT_BREAKER_TRIPPED",
+                "expected_action": "CHUNKS_WITHHELD_AS_UNSUPPORTED",
                 "actual_status": retrieval_res["status"],
                 "is_intercepted": is_intercepted,
                 "latency_ms": t_elapsed_ms,
-                "interception_reason": retrieval_res["reason"]
+                "reason": retrieval_res["reason"]
             })
 
         # -----------------------------------------------------------------
@@ -110,7 +112,7 @@ class Phase4DemoRunner:
             retrieval_res = self.retriever.format_granite_context(item["prompt"])
             t_elapsed_ms = round((time.perf_counter() - t_start) * 1000, 2)
 
-            is_verified = not retrieval_res["is_poison"]
+            is_verified = retrieval_res["retrieval_supported"]
             if is_verified:
                 grounded_verified += 1
 

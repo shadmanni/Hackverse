@@ -86,23 +86,48 @@ class TestRetrieverScoring(unittest.TestCase):
                 self.assertGreaterEqual(h["similarity_score"], 0.0, f"{q}: score below 0")
                 self.assertLessEqual(h["similarity_score"], 1.0, f"{q}: score above 1")
 
-    def test_grounded_queries_are_not_intercepted(self):
+    def test_chunk_level_queries_are_well_supported(self):
+        """Queries that name an entity a chunk describes must retrieve it."""
         for q in [
             "What is the cycle time for invoice approval",
             "What is the average compliance cycle time for high-value orders above $100,000?",
             "What is the amount and resource for the Purchase Order in CASE-10231?",
             "Which warehouse node caused a delay in CASE-10298 and how many days were added?",
         ]:
-            is_poison, why = self.r.is_poison_prompt(q)
-            self.assertFalse(is_poison, f"false positive on grounded query {q!r}: {why}")
+            weak, why = self.r.retrieval_support(q)
+            self.assertFalse(weak, f"chunk-level query reported unsupported: {q!r}: {why}")
 
-    def test_ungrounded_queries_are_intercepted(self):
+    def test_nonsense_retrieves_nothing_worth_showing(self):
         for q in [
             "banana helicopter zebra nonsense",
             "What is the capital of France and its GDP growth rate?",
         ]:
-            is_poison, _ = self.r.is_poison_prompt(q)
-            self.assertTrue(is_poison, f"missed ungrounded query {q!r}")
+            weak, _ = self.r.retrieval_support(q)
+            self.assertTrue(weak, f"nonsense query reported as supported: {q!r}")
+
+    def test_retrieval_support_is_not_an_answerability_verdict(self):
+        """
+        The measured reason the keyword list could not simply be swapped for a
+        score threshold. Both of these are real and both break the assumption
+        that a high score means answerable and a low score means not:
+
+          a corpus-level question no single chunk resembles scores LOW but is
+          answerable from the aggregates;
+          a fabricated question about real entities retrieves those entities and
+          scores HIGH while the log holds neither figure it asks for.
+
+        If this ever starts passing as a clean separation, the architecture
+        argument in phase3_rag_retriever's header needs re-measuring, not the
+        test deleting.
+        """
+        low_but_answerable, _ = self.r.retrieval_support("How many cases are in the event log?")
+        high_but_unanswerable, _ = self.r.retrieval_support(
+            "What was the throughput delay and inventory holding time at warehouse node W-88?")
+        self.assertTrue(
+            low_but_answerable or not high_but_unanswerable,
+            "retrieval score now separates answerability on this fixture - the "
+            "claim that it cannot is no longer supported by the data",
+        )
 
     def test_separation_margin_between_grounded_and_nonsense(self):
         grounded = max(h["similarity_score"] for h in self.r.retrieve("invoice approval cycle time"))
@@ -150,3 +175,148 @@ class TestUnqualifiedCycleTimeIsBound(unittest.TestCase):
                 cm.is_grounded_number(value, scope="aggregate", metric=cm.bound_metric(text)),
                 f"{value} was rejected for {text!r} - generic phrase shadowed the specific one",
             )
+
+
+class TestStatisticBinding(unittest.TestCase):
+    """
+    A figure can be real, belong to the right metric, and still be a lie because
+    it is the WRONG STATISTIC of that metric. Set membership cannot see it.
+
+    Expected values are written here by hand rather than read back out of
+    celonis_metrics, so these fail if the underlying numbers move.
+    """
+
+    def check(self, text: str, value: float) -> bool:
+        return cm.is_grounded_number(
+            value, scope="aggregate",
+            metric=cm.bound_metric(text), statistic=cm.bound_statistic(text),
+        )
+
+    def test_max_stated_as_the_mean_is_rejected(self):
+        # Compliance Review: mean 10.43, max 16. Both real; only one is "average".
+        self.assertFalse(self.check("Compliance Review took 16 days on average", 16),
+                         "the activity's MAX passed as its MEAN")
+
+    def test_each_statistic_passes_under_its_own_name(self):
+        self.assertTrue(self.check("Compliance Review took 10.43 days on average", 10.43))
+        self.assertTrue(self.check("the longest Compliance Review took 16 days", 16))
+
+    def test_unnamed_statistic_falls_back_and_never_tightens(self):
+        # No statistic word, so the check must stay exactly as permissive as it
+        # was before this feature existed - this is the no-regression guarantee.
+        for value in (10.43, 16, 122):
+            text = f"Compliance Review covers {value}"
+            self.assertIsNone(cm.bound_statistic(text))
+            self.assertTrue(self.check(text, value))
+
+    def test_ambiguous_statistic_does_not_bind(self):
+        # Naming two statistics must not enforce one of them arbitrarily.
+        self.assertIsNone(cm.bound_statistic("the mean and the longest Compliance Review"))
+
+
+class TestTheSystemPassesItsOwnChecker(unittest.TestCase):
+    """
+    Everything Sentinel writes into the prompt, or returns as its verified
+    answer, must survive the check it applies to the model.
+
+    This is the invariant that was silently false. The deterministic recovery
+    answer - generated from the event log and true by construction - was
+    reported as containing ungrounded figures on four of five queries, because
+    metric and statistic binding read those words out of a NEIGHBOURING clause:
+    "occurs 122 times ... with a mean cycle time of 10.43" bound the count 122 to
+    "mean", and the process title "Order-to-Cash (O2C) Compliance Cycle" bound
+    every later figure in the sentence to the order-to-cash metric.
+
+    A checker that rejects its own ground truth would have shown judges a
+    NOT GROUNDED badge on the one answer that cannot be wrong.
+    """
+
+    def setUp(self):
+        from sentinel_stream import SentinelStream
+        self.s = SentinelStream(runner=None, retriever=None)
+
+    def test_aggregate_block_is_self_consistent(self):
+        """Every figure handed to the model as VERIFIED AGGREGATES must pass."""
+        from sentinel_stream import SentinelStream
+        block = SentinelStream._aggregate_block()
+        offending, _ = self.s._scan_new_figures(block, 0, complete_only=False)
+        self.assertIsNone(
+            offending,
+            f"the context we give the model states {offending}, which our own "
+            f"grounding check rejects - the model would be penalised for quoting it",
+        )
+
+    def test_deterministic_recovery_answers_are_self_consistent(self):
+        for q in (
+            "Give the exact mean cycle time for Compliance Review.",
+            "What is the mean compliance cycle time?",
+            "How many cases are in the event log?",
+            "How many orders are above $100,000?",
+            "What percentage of orders were flagged as supply chain bottlenecks?",
+            "What is the average approval delay?",
+        ):
+            answer = cm.ground_truth_answer(q)
+            offending, _ = self.s._scan_new_figures(answer, 0, complete_only=False)
+            self.assertIsNone(
+                offending,
+                f"recovery answer for {q!r} states {offending}, which the "
+                f"grounding check rejects:\n  {answer}",
+            )
+
+    def test_clause_binding_does_not_cross_into_the_next_claim(self):
+        """The specific attribution bug, pinned."""
+        text = "'Compliance Review' occurs 122 times in the log with a mean cycle time of 10.43 days"
+        i = text.index("122")
+        self.assertIsNone(
+            cm.bound_statistic(self.s._statistic_span(text, i, i + 3)),
+            "a count was bound to 'mean' from a later clause",
+        )
+
+    def test_process_title_does_not_bind_later_figures(self):
+        title = "Order-to-Cash (O2C) Compliance Cycle (Celonis EMS): 150 cases"
+        self.assertIsNone(
+            cm.bound_metric(self.s._clause(title)),
+            "the process name bound figures to the order-to-cash metric",
+        )
+
+
+class TestMetricNamedAfterTheFigure(unittest.TestCase):
+    """
+    English names the metric after the figure at least as often as before it,
+    and the span only looked backwards.
+
+    "3 events are recorded for the Invoice Approved activity" bound to no metric,
+    fell back to the whole-log check, and passed because 3 is some event's cycle
+    time. The real count is 150. This was a live answer on a green-path demo
+    prompt - a flat fabrication streaming clean past both layers.
+    """
+
+    def setUp(self):
+        from sentinel_stream import SentinelStream
+        self.s = SentinelStream(runner=None, retriever=None)
+
+    def _caught(self, text):
+        return self.s._scan_new_figures(text, 0, complete_only=False)[0] is not None
+
+    def test_false_count_with_trailing_metric_is_caught(self):
+        self.assertTrue(
+            self._caught("3 events are recorded for the Invoice Approved activity."),
+            "a fabricated count bound to no metric because the metric came after it",
+        )
+
+    def test_true_count_with_trailing_metric_passes(self):
+        self.assertFalse(
+            self._caught("There are 150 events recorded for the Invoice Approved activity."))
+
+    def test_lookahead_is_confined_to_the_sentence(self):
+        """A metric in the NEXT sentence must not bind backwards into this one."""
+        self.assertFalse(
+            self._caught("There are 150 events. Invoice Approved has a mean cycle time of 12.01 days."))
+
+    def test_midstream_binding_is_unaffected(self):
+        """
+        Mid-decode there is no text after the figure, so the lookahead must be
+        a no-op rather than a crash or a changed verdict.
+        """
+        partial = "The mean compliance cycle time is 10.4"
+        self.assertFalse(self.s._scan_new_figures(partial, 0, complete_only=False)[0] is not None)

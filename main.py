@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 
 import celonis_metrics as cm
+import semantic_divergence as sd
 from entropy_engine import EntropyEngine
 from sentinel_stream import SentinelStream
 
@@ -171,29 +172,42 @@ async def get_metrics():
 
 
 @app.get("/stream")
-async def stream_tokens(query: str = Query(None)):
+async def stream_tokens(query: str = Query(None), mode: str = Query("deployed")):
+    """
+    mode=deployed (default) - Sentinel as it would actually be deployed:
+        retrieved context and the grounding instruction go to the model, and the
+        audit runs on top. Answerable questions stream through untouched;
+        fabrications are still caught, because the audit is downstream of the
+        prompt and does not care how the model was asked.
+
+    mode=ab - the controlled experiment: the protected panel decodes from the
+        SAME context-free prompt as /unprotected_stream, so exactly one variable
+        differs between the two panels - the proxy itself. Retrieval is deferred
+        to the recovery pass.
+
+    `deployed` is the default because `ab` was the only behaviour, and it made
+    the firewall trip on all four answerable demo prompts. Every one recovered
+    to a correct answer, so nothing was wrong - but a detector that fires on
+    every input demonstrates nothing about discrimination, and the measured
+    zero-false-positive result was invisible. The A/B remains available because
+    it is the honest way to show the proxy is the cause.
+    """
     # `graph` is no longer a parameter: the log contains exactly one process.
     # FastAPI ignores the extra query param older clients still send.
     q = query or "What is the mean compliance cycle time?"
+    grounded = mode != "ab"
 
     async def gen():
         if not _state["runner"]:
             yield sse("error", message="Granite model not loaded")
             return
-        # The proxy audits the request the application actually sends, and a
-        # naive integration sends no retrieved context - that is the deployment
-        # Sentinel exists to protect. Running the SAME prompt as
-        # /unprotected_stream also makes the split-screen a controlled
-        # experiment: one variable differs between the panels, the proxy itself.
-        # Retrieval is not skipped, it is deferred to the recovery pass, where
-        # the context gap is repaired and the answer regenerated under grounding.
         stream = SentinelStream(
             runner=_state["runner"],
             retriever=_state["retriever"],
             tau=TAU,
             window_size=WINDOW,
             max_new_tokens=MAX_NEW_TOKENS,
-            grounded_prompt=False,
+            grounded_prompt=grounded,
         )
         try:
             async for ev in stream.run(q):
@@ -230,6 +244,10 @@ async def stream_unprotected(query: str = Query(None)):
                 _, uncertainty, variance = engine.evaluate_token(
                     step.text, logprob=step.logprob, top_probs=step.top_probs
                 )
+                # Same divergence measure as the protected path. Both panels have
+                # to be scored the same way or the split-screen graph compares
+                # two different quantities and proves nothing.
+                divergence = sd.analyse(step.top_tokens, step.top_probs)
                 count += 1
                 yield sse(
                     "token",
@@ -239,6 +257,8 @@ async def stream_unprotected(query: str = Query(None)):
                     uncertainty=round(uncertainty, 4),
                     rolling_variance=round(variance, 4),
                     shannon_entropy=round(engine.compute_shannon_entropy(step.top_probs), 4),
+                    semantic_entropy=round(divergence.semantic_entropy, 4),
+                    figure_at_stake=divergence.divergent,
                     index=step.index,
                 )
             yield sse(

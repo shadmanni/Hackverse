@@ -48,7 +48,7 @@ class Ungrounded(SentinelStream):
     """The naive integration: no retrieved context, and no interception acted on."""
 
     def _context_for(self, query: str) -> Dict[str, Any]:
-        return {"context": None, "is_poison": False, "reason": "naive integration", "chunks": []}
+        return {"context": None, "retrieval_supported": False, "reason": "naive integration", "chunks": []}
 
 
 async def run_panel(stream: SentinelStream, query: str) -> Dict[str, Any]:
@@ -144,6 +144,18 @@ async def main() -> int:
     answerable = [r for r in rows if r["class"] == "answerable"]
     stopped = sum(1 for r in unanswerable if r["protected"]["intercepted"])
     fabricating = [r for r in unanswerable if r["baseline_fabricated_figures"]]
+    # A run that was not intercepted counts only if it actually stayed clean.
+    #
+    # This was previously printed as `stopped + (count of NOT intercepted)`,
+    # which partitions the list: it summed to len(unanswerable) on every
+    # possible run, so it reported a perfect score even where the firewall did
+    # nothing. Checking the surviving text for ungrounded figures is the
+    # measurement that can fail, which is the only kind worth printing.
+    held = stopped + sum(
+        1 for r in unanswerable
+        if not r["protected"]["intercepted"]
+        and not ungrounded_figures(r["protected"]["text"])
+    )
 
     overheads = [
         r["protected"]["summary"]["overhead_pct"]
@@ -167,8 +179,10 @@ async def main() -> int:
     print("SUMMARY")
     print("=" * 78)
     print(f"Baseline fabricated a figure on      : {len(fabricating)}/{len(unanswerable)} unanswerable prompts")
-    print(f"Sentinel stopped or refused          : {stopped + sum(1 for r in unanswerable if not r['protected']['intercepted'])}/{len(unanswerable)}")
+    print(f"Sentinel held the line               : {held}/{len(unanswerable)}")
     print(f"  of which halted mid-generation     : {stopped}")
+    print(f"  of which refused, stating no figure: {held - stopped}")
+    print(f"  of which stated a bad figure anyway: {len(unanswerable) - held}")
     print(f"False positives on answerable prompts: {false_positives}/{len(answerable)}")
     if overheads:
         print(f"Audit overhead (median)              : {statistics.median(overheads):.4f}% of decode time")
@@ -183,7 +197,10 @@ async def main() -> int:
             "summary": {
                 "unanswerable_prompts": len(unanswerable),
                 "baseline_fabricated": len(fabricating),
+                "held_the_line": held,
                 "halted_mid_generation": stopped,
+                "refused_without_figure": held - stopped,
+                "leaked_bad_figure": len(unanswerable) - held,
                 "false_positives": false_positives,
                 "answerable_prompts": len(answerable),
                 "median_overhead_pct": statistics.median(overheads) if overheads else None,

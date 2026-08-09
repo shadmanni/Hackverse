@@ -33,6 +33,12 @@ interface StreamEvent {
   breach_run?: number;
   ungrounded_value?: number | null;
   tokens_before_halt?: number;
+  semantic_entropy?: number;
+  figure_at_stake?: boolean;
+  /** the decoder's top-k where the figure was chosen, clustered by value */
+  candidates?: { token: string; p: number; cluster: string }[] | null;
+  candidates_token_index?: number | null;
+  divergence_explained?: string | null;
   // done
   tokens?: number;
   elapsed_ms?: number;
@@ -44,6 +50,8 @@ interface StreamEvent {
   retrieval_reason?: string;
   regenerated?: boolean;
   all_figures_grounded?: boolean;
+  /** the regeneration was rejected and replaced by the deterministic lookup */
+  fell_back_to_lookup?: boolean;
 }
 
 interface PanelState {
@@ -158,6 +166,7 @@ export default function SplitScreenResponse({ query, graphName, onDone }: Props)
     text: string;
     streaming: boolean;
     verified?: boolean;
+    fellBack?: boolean;
   } | null>(null);
   const tau = right.intercept?.tau ?? 0.65;
   const startedAt = useRef<number>(0);
@@ -229,6 +238,7 @@ export default function SplitScreenResponse({ query, graphName, onDone }: Props)
                 text: e.text ?? h?.text ?? "",
                 streaming: false,
                 verified: e.all_figures_grounded,
+                fellBack: e.fell_back_to_lookup,
               }));
             }
           },
@@ -409,6 +419,58 @@ export default function SplitScreenResponse({ query, graphName, onDone }: Props)
                     <dt className="text-slate-500">halted after</dt>
                     <dd>{right.intercept.tokens_before_halt} tokens</dd>
                   </dl>
+
+                  {/* What the decoder was choosing between at the halt. The
+                      scalar entropies say uncertainty was high; this says what
+                      it was about, which is the only form of it a judge can
+                      check by eye. */}
+                  {!!right.intercept.candidates?.length && (
+                    <div className="mt-3 pt-2.5 border-t border-rose-800/50">
+                      {/* Deliberately not "at the halt": the breaker trips when
+                          the figure terminates, one or more tokens after the
+                          value was chosen. This is the choosing token. */}
+                      <span className="text-[10px] font-mono text-slate-400 uppercase tracking-wider">
+                        Candidates where the figure was chosen
+                        {right.intercept.candidates_token_index != null
+                          ? ` · token #${right.intercept.candidates_token_index}`
+                          : ""}
+                      </span>
+                      <div className="mt-1.5 space-y-1">
+                        {right.intercept.candidates.map((c, i) => {
+                          const isFigure = c.cluster.startsWith("#");
+                          return (
+                            <div key={i} className="flex items-center gap-2 font-mono text-[11px]">
+                              <span
+                                className={`w-14 shrink-0 truncate text-right ${
+                                  isFigure ? "text-rose-300 font-bold" : "text-slate-500"
+                                }`}
+                              >
+                                {c.token.trim() || "␣"}
+                              </span>
+                              <div className="flex-1 h-2 bg-black/40 rounded-sm overflow-hidden">
+                                <div
+                                  className={`h-full ${isFigure ? "bg-rose-500" : "bg-slate-700"}`}
+                                  style={{ width: `${Math.max(c.p * 100, 1)}%` }}
+                                />
+                              </div>
+                              <span
+                                className={`w-11 shrink-0 tabular-nums ${
+                                  isFigure ? "text-rose-300" : "text-slate-500"
+                                }`}
+                              >
+                                {(c.p * 100).toFixed(1)}%
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {right.intercept.divergence_explained && (
+                        <p className="mt-2 text-[10px] leading-relaxed text-slate-400 italic">
+                          {right.intercept.divergence_explained}
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </motion.div>
               )}
             </AnimatePresence>
@@ -440,14 +502,28 @@ export default function SplitScreenResponse({ query, graphName, onDone }: Props)
                   </p>
                   {!healing.streaming && (
                     <div className="mt-2 flex items-center gap-1 text-[10px] font-mono border-t border-slate-800/80 pt-1.5">
-                      {healing.verified ? (
+                      {/* Three states, not two. The backend emits
+                          fell_back_to_lookup, and the UI ignored it: when the
+                          regeneration was REJECTED and swapped for the log
+                          lookup, all_figures_grounded described the replacement
+                          and this still printed the green "regenerated under
+                          grounding" tick. The panel claimed a regeneration that
+                          had been thrown away, in a product about unverifiable
+                          claims. Both paths end grounded, so nothing was unsafe
+                          - but which one ran has to be visible. */}
+                      {!healing.verified ? (
+                        <span className="text-amber-400">
+                          answer still contains an unverifiable figure
+                        </span>
+                      ) : healing.fellBack ? (
+                        <span className="flex items-center gap-1 text-sky-400">
+                          <CheckCircle2 className="w-3 h-3" />
+                          regeneration rejected — answered from a deterministic log lookup
+                        </span>
+                      ) : (
                         <span className="flex items-center gap-1 text-emerald-400">
                           <CheckCircle2 className="w-3 h-3" />
                           regenerated under grounding — every figure verified against the event log
-                        </span>
-                      ) : (
-                        <span className="text-amber-400">
-                          regeneration still ungrounded — fell back to a deterministic log lookup
                         </span>
                       )}
                     </div>
@@ -478,8 +554,10 @@ export default function SplitScreenResponse({ query, graphName, onDone }: Props)
 
       <p className="text-[10px] text-slate-500 font-mono flex items-center gap-1.5">
         <Activity className="w-3 h-3" />
-        Both panels are the same local Granite model. Left has no retrieved context and no
-        interception; right has both. Nothing is pre-scripted.
+        Both panels are the same local Granite model running the identical prompt, and
+        neither is given retrieved context up front — so exactly one variable differs, the
+        audit itself. The right panel is scored per token and retrieves only once it
+        intercepts, to repair the gap it found. Nothing is pre-scripted.
       </p>
     </div>
   );

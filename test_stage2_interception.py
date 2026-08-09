@@ -275,5 +275,53 @@ class TestTelemetryIsMeasured(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(icept.payload["tokens_before_halt"], emitted)
 
 
+class TestCandidateFanPointsAtTheFigure(unittest.IsolatedAsyncioTestCase):
+    """
+    The UI tells judges "here is what the model was choosing between when it
+    picked that number". Nothing else asserts that claim is true.
+
+    Every index below is written down by hand from the script, deliberately NOT
+    derived from celonis_metrics or from the engine. A check that computes its
+    expectation with the same code it is checking can only prove the system
+    agrees with itself.
+    """
+
+    # "87.6" is not a figure the event log can produce. Tokens:
+    #   0 "The"  1 " mean"  2 " is"  3 " 87"  4 "."  5 "6"  6 " days"
+    # The breaker trips at 6, because that is where the figure TERMINATES.
+    # The value was chosen at 5. Those are different tokens, which is the
+    # entire point.
+    SCRIPT = [("The", 0.98), (" mean", 0.97), (" is", 0.96),
+              (" 87", 0.99), (".", 0.99), ("6", 0.99), (" days", 0.98)]
+
+    async def test_fan_comes_from_the_figure_not_the_halting_token(self):
+        evs = await run(self.SCRIPT)
+        icept = [e for e in evs if e.kind == "intercept"][0].payload
+
+        self.assertEqual(icept["candidates_token_index"], 5)
+        self.assertNotEqual(
+            icept["candidates_token_index"], 6,
+            "reporting the halting token shows the model choosing between words "
+            "at the exact moment we claim it was choosing between numbers",
+        )
+        self.assertTrue(any(c["cluster"].startswith("#") for c in icept["candidates"]),
+                        f"decision token carried no figure: {icept['candidates']}")
+
+    async def test_trailing_figure_still_carries_a_fan(self):
+        # Ends ON the figure, so the stream is exhausted before the check runs
+        # and there is no live step at the halt. The fan must survive that path.
+        evs = await run(self.SCRIPT[:-1])
+        icept = [e for e in evs if e.kind == "intercept"][0].payload
+
+        self.assertIsNotNone(icept["candidates"], "trailing-figure halt lost the fan")
+        self.assertEqual(icept["candidates_token_index"], 5)
+
+    async def test_clean_stream_reports_no_fan(self):
+        # Nothing was intercepted, so there is no figure to explain.
+        evs = await run([(w, 0.97) for w in ["The", " process", " is", " documented", "."]])
+        self.assertEqual(evs[-1].kind, "done")
+        self.assertEqual([e for e in evs if e.kind == "intercept"], [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

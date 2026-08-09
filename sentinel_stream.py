@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import celonis_metrics as cm
+import semantic_divergence as sd
 from entropy_engine import EntropyEngine
 
 # A quantitative claim: a standalone number, optionally with $ , . and %.
@@ -42,8 +43,59 @@ from entropy_engine import EntropyEngine
 # the "99" was scored as a fabricated number.
 _NUM_RE = re.compile(
     r"(?<![A-Za-z0-9_.\-])"      # not preceded by identifier characters
-    r"-?\$?\d[\d,]*(?:\.\d+)?%?"
+    # The digit/separator run must END on a digit. As [\d,]* it swallowed a
+    # trailing sentence comma - "above $100,000, the mean..." matched
+    # "$100,000," - and the parsed value was then checked as though the claim
+    # were about the comma's clause. Harmless-looking, but it was reporting the
+    # log's own threshold as a contradiction.
+    r"-?\$?\d(?:[\d,]*\d)?(?:\.\d+)?%?"
     r"(?![A-Za-z0-9_\-])"        # not followed by identifier characters
+)
+
+
+# Where one quantitative claim ends and the next begins. Punctuation, plus the
+# connectives that start a new claim about a different quantity ("... 122 times
+# WITH a mean cycle time of 10.43"). Deliberately does NOT include "of" or "is",
+# which sit inside a single claim ("a mean cycle time OF 10.43").
+# A period or comma only ends a clause when it is NOT inside a number.
+#
+# Written as a bare [.,] this split "The mean compliance cycle time is 10.4" at
+# the decimal point, leaving the clause as "4" - so bound_metric saw no metric
+# and every DECIMAL figure silently lost its binding. Integers still bound, which
+# is what made it hard to see: "12 days" halted and "12.5 days" sailed through,
+# and 12.5 is the flagship demo interception. Thousands separators had the same
+# problem ("$128,500" -> "500").
+# \n is a hard boundary in both: the aggregate block is one claim per LINE, and
+# without it "Scope: 150 cases, 460 events" reached into the next line and bound
+# 460 to "compliance cycle time", so the context the model is told to quote
+# failed the check applied to the model for quoting it.
+_CLAUSE_BREAK = re.compile(
+    r"(?<!\d)[.,](?!\d)|[;:()\[\]\n]"
+    r"|\b(?:with|across|while|whereas|although|and|but|however)\b",
+    re.IGNORECASE,
+)
+
+# Sentence-level break: punctuation that separates a TITLE or a parenthetical
+# from a claim, but NOT the conjunctions above. Used for metric binding, which
+# has a wider natural scope than statistic binding - see _metric_span.
+_SENTENCE_BREAK = re.compile(r"(?<!\d)[.](?!\d)|[;:()\[\]\n]")
+
+# A figure in a QUALIFIER slot is not a value OF the metric named around it - it
+# is a condition on that metric, or the population it is drawn from:
+#
+#   "high-value orders above $100,000"   $100,000 is the CRITERION, not a cycle time
+#   "38 of 150 cases were flagged ..."   150 is the DENOMINATOR, not a bottleneck count
+#
+# Binding those narrows the admissible set to the metric's own values and then
+# rejects a figure that is true, which is a halt on a correct answer - both of
+# these appear in the system's OWN deterministic recovery answers. The "of"
+# branch requires a preceding figure so the far more common "a mean cycle time
+# of 10.43" still binds normally.
+_QUALIFIER_BEFORE = re.compile(
+    r"(?:\d[\d,.]*\s+of"
+    r"|above|below|over|under|exceeding|more than|less than|at least|at most)"
+    r"\s+\$?$",
+    re.IGNORECASE,
 )
 
 
@@ -152,14 +204,14 @@ class SentinelStream:
     def _context_for(self, query: str) -> Dict[str, Any]:
         agg = self._aggregate_block()
         if not self.retriever:
-            return {"context": agg, "is_poison": False, "reason": "no retriever", "chunks": []}
+            return {"context": agg, "retrieval_supported": False, "reason": "no retriever", "chunks": []}
         try:
             res = self.retriever.format_granite_context(query)
             chunks = res.get("context")
             res["context"] = f"{agg}\n\nRETRIEVED EVENT CHUNKS:\n{chunks}" if chunks else agg
             return res
         except Exception as err:  # retrieval must never take the stream down
-            return {"context": agg, "is_poison": False, "reason": f"retrieval error: {err}", "chunks": []}
+            return {"context": agg, "retrieval_supported": False, "reason": f"retrieval error: {err}", "chunks": []}
 
     # ---------- numeric grounding ----------
 
@@ -195,6 +247,119 @@ class SentinelStream:
         return tail[-1].isdigit() or (len(tail) > 1 and tail[-1] in ".," and tail[-2].isdigit())
 
     @classmethod
+    def _statistic_span(cls, text: str, start: int, end: int) -> str:
+        """
+        The text that may name the statistic for the figure at [start, end):
+        from the end of the previous figure to the start of the next one.
+
+        Bounded on BOTH sides, for two different failures.
+
+        Left, or one statistic word captures every figure after it: "the mean
+        cycle time for Compliance Review is 10.43 days across 122 events" bound
+        both figures to `mean`, and rejected 122 - a correct event count - for
+        not being a mean.
+
+        Right, because English puts the statistic after the figure just as
+        often: "Compliance Review took 16 days on average" is the whole case
+        this exists to catch, and a left-only span cannot see "on average" at
+        all. Mid-stream that phrasing is still checked before the words arrive -
+        see audit_figures for where it is caught instead.
+        """
+        prev = list(_NUM_RE.finditer(text[:start]))
+        left = prev[-1].end() if prev else 0
+        nxt = _NUM_RE.search(text[end:])
+        right = end + (nxt.start() if nxt else len(text) - end)
+
+        # Then clipped to the figure's own CLAUSE. Bounding only by neighbouring
+        # figures let a statistic word leak across a clause boundary: in
+        #   "'Compliance Review' occurs 122 times ... with a mean cycle time of 10.43"
+        # 122 is the first figure, so its span ran to 10.43 and swallowed "mean" -
+        # binding a COUNT to the mean and rejecting it. The deterministic
+        # recovery answer, which is generated from the log and true by
+        # construction, failed its own grounding check because of it.
+        lb = list(_CLAUSE_BREAK.finditer(text[left:start]))
+        if lb:
+            left += lb[-1].end()
+        rb = _CLAUSE_BREAK.search(text[end:right])
+        if rb:
+            right = end + rb.start()
+        return text[left:right]
+
+    @staticmethod
+    def _metric_span(prefix: str, tail: str = "") -> str:
+        """
+        The text that may name the METRIC for a figure: its sentence.
+
+        `tail` is the text AFTER the figure, when it exists. English names the
+        metric after the figure at least as often as before it:
+
+            "3 events are recorded for the Invoice Approved activity."
+
+        With a prefix-only span that figure binds to no metric, falls back to the
+        whole-log check, and passes because 3 is some event's cycle time. The
+        real Invoice Approved count is 150, and this was a live answer on a
+        GREEN-PATH demo prompt - a flat fabrication streaming clean.
+
+        Mid-decode the tail does not exist yet, so binding is prefix-only there
+        and this costs nothing; the end-of-stream flush and audit_figures both
+        pass the full text, which is where the claim is finally settled.
+
+        Metric and statistic bind at different scopes, and collapsing them to one
+        span breaks whichever is not favoured.
+
+        A STATISTIC is clause-local - "mean" governs the phrase it sits in, and
+        letting it cross a conjunction bound a count to a mean.
+
+        A METRIC is named once and governs the rest of the sentence:
+
+            "'Compliance Review' occurs 122 times ... with a mean cycle time of 10.43"
+
+        clipping to the clause severs 10.43 from "Compliance Review", so the
+        generic "cycle time" alias wins by default and 10.43 - that activity's
+        correct mean - is checked against the overall 8.5 and rejected. That is a
+        halt on a true statement, produced by the system's own deterministic
+        recovery answer.
+
+        The span cannot simply be the whole prefix either: a process TITLE would
+        then bind every figure after it ("Order-to-Cash ... Compliance Cycle: 150
+        cases / 460 events" bound 150 to order-to-cash, whose only value is 12.0).
+        Titles are separated from claims by a colon, bracket or full stop, so
+        breaking on those and NOT on conjunctions satisfies both cases.
+        """
+        parts = _SENTENCE_BREAK.split(prefix)
+        span = parts[-1] if parts else prefix
+        if tail:
+            # Forward reach stops at the CLAUSE, not the sentence. The scopes are
+            # deliberately asymmetric: a metric named earlier governs what
+            # follows it, but a metric named later belongs to its own claim.
+            # Reaching forward by sentence let "Mean cycle time 8.5 days, median
+            # 9.0, declared compliance cycle time 10.4" bind 8.5 to the
+            # compliance metric two clauses away and reject the log's own
+            # overall mean.
+            span = f"{span} {_CLAUSE_BREAK.split(tail)[0]}"
+        return span
+
+    @staticmethod
+    def _clause(prefix: str) -> str:
+        """
+        The clause a figure sits in - everything since the last clause break.
+
+        Metric binding has the same leak as statistic binding. The recovery
+        answer opens with the process TITLE:
+
+            "Order-to-Cash (O2C) Compliance Cycle (...): 150 cases / 460 events.
+             Mean cycle time 8.5 days, ..."
+
+        bound_metric scans a 200-character prefix window, so "order-to-cash" in
+        the title bound every later figure to the order-to-cash metric - whose
+        only admissible value is 12.0 - and 150, 460 and 8.5 were all reported as
+        contradicting the log they were computed from. A process name is a title,
+        not a claim about a metric.
+        """
+        parts = _CLAUSE_BREAK.split(prefix)
+        return parts[-1] if parts else prefix
+
+    @classmethod
     def _claim_scope(cls, text: str, figure: str = "", window: int = 160) -> str:
         """'aggregate' if the claim is about a derived quantity, else 'all'."""
         # No event field in the log is a percentage, so any percentage the model
@@ -207,7 +372,8 @@ class SentinelStream:
         return "aggregate" if any(w in recent for w in cls._AGG_WORDS) else "all"
 
     def _ungrounded_number(
-        self, span: str, scope: str = "all", metric: Optional[str] = None
+        self, span: str, scope: str = "all", metric: Optional[str] = None,
+        statistic: Optional[str] = None,
     ) -> Optional[float]:
         """First number in `span` that the event log cannot produce."""
         # A percentage that names no metric we know cannot be grounded at all.
@@ -222,7 +388,7 @@ class SentinelStream:
             if vals:
                 return vals[0]
         for val in self._numbers_in(span):
-            if not cm.is_grounded_number(val, scope=scope, metric=metric):
+            if not cm.is_grounded_number(val, scope=scope, metric=metric, statistic=statistic):
                 return val
         return None
 
@@ -251,26 +417,104 @@ class SentinelStream:
                 m.group(),
                 scope=self._claim_scope(prefix, figure=m.group()),
                 # If the sentence names a metric, the figure must be one of THAT
-                # metric's values, not merely some value in the log.
-                metric=cm.bound_metric(prefix),
+                # metric's values, not merely some value in the log - unless the
+                # figure is a threshold or a denominator, which qualify the
+                # metric rather than state it.
+                metric=None if _QUALIFIER_BEFORE.search(text[:m.start()])
+                else cm.bound_metric(self._metric_span(prefix, tail)),
+                # And if it names the statistic too, it must be that statistic's
+                # value - "16 days on average" quotes Compliance Review's max.
+                statistic=cm.bound_statistic(self._statistic_span(text, m.start(), m.end())),
             )
             if val is not None:
                 return val, scanned_to
         return None, scanned_to
 
+    def audit_figures(self, text: str) -> Dict[str, Any]:
+        """
+        Classify every figure in `text` as verified / unverifiable / contradicted.
+
+        Why three states and not two
+        ----------------------------
+        `_scan_new_figures` answers one question - did any figure CONTRADICT the
+        log - and the flag built from it was called `all_figures_grounded`, which
+        reads as "every figure was confirmed". Those are not the same claim, and
+        the gap between them is most of this layer's real error budget.
+
+        A figure is only genuinely confirmed when the sentence names a metric
+        (one of the phrases in cm.metric_aliases) and the value is one that
+        metric can take. With no metric bound, the value is compared against
+        every number the log can produce - 189 of them under scope="all" - and
+        passing that is weak evidence: measured against arbitrary figures, 80% of
+        integers 1-30 and 53% of one-decimal day values clear it. Calling that
+        "grounded" is the same overclaim the project exists to catch.
+
+        So: `verified` means bound and admissible. `unverifiable` means nothing
+        contradicted it and nothing confirmed it either. `contradicted` is the
+        only state that halts, and this method does not change what halts - it
+        only stops the report from claiming more than the check performed.
+        """
+        counts = {"verified": 0, "unverifiable": 0, "contradicted": 0}
+        detail: List[Dict[str, Any]] = []
+        for m in _NUM_RE.finditer(text):
+            figure = m.group()
+            prefix = text[:m.end()]
+            metric = (
+                None if _QUALIFIER_BEFORE.search(text[:m.start()])
+                else cm.bound_metric(self._metric_span(prefix, text[m.end():]))
+            )
+            statistic = cm.bound_statistic(self._statistic_span(text, m.start(), m.end()))
+            scope = self._claim_scope(prefix, figure=figure)
+            contradicted = self._ungrounded_number(
+                figure, scope=scope, metric=metric, statistic=statistic
+            ) is not None
+            if contradicted:
+                state = "contradicted"
+            elif metric is not None:
+                state = "verified"
+            else:
+                state = "unverifiable"
+            counts[state] += 1
+            detail.append({"figure": figure, "state": state, "metric": metric,
+                           "statistic": statistic, "scope": scope})
+        return {**counts, "figures": detail}
+
     # ---------- interception ----------
 
     async def _trip(
         self, query, rag, reason, tok, step, uncertainty, variance, shannon,
-        ungrounded_value, emitted, history, t0, overhead_s,
+        ungrounded_value, emitted, history, t0, overhead_s, decision=None,
     ) -> AsyncIterator[InterceptionEvent]:
-        """Emit the interception + autonomous recovery pair for a tripped breaker."""
+        """
+        Emit the interception + autonomous recovery pair for a tripped breaker.
+
+        :param decision: (step, divergence) captured at the most recent token
+            whose candidate set contained a figure - the moment the value was
+            actually chosen. NOT the token being halted on.
+
+            Those are rarely the same token. `ungrounded_number` trips when the
+            figure TERMINATES, so the halting step is the character after the
+            digits (" days"), whose candidates are prose; and the trailing-figure
+            path halts after the stream is exhausted, with no live step at all.
+            Reporting either one's candidate set showed the model choosing
+            between words at the exact moment the pitch claims it was choosing
+            between numbers. This carries the decision point instead.
+        """
+        dstep, div = decision if decision else (None, None)
         yield InterceptionEvent(
             kind="intercept",
             text=tok,
             payload={
                 "reason": reason,
                 "token": tok,
+                # What the decoder was choosing between when it picked the value.
+                # The scalar entropies say uncertainty was high; this says what
+                # the uncertainty was ABOUT, which is the only form of it a
+                # non-specialist can check by eye.
+                "candidates": sd.fan(dstep.top_tokens, dstep.top_probs) if dstep else None,
+                "candidates_token_index": dstep.index if dstep else None,
+                "semantic_entropy": round(div.semantic_entropy, 4) if div else None,
+                "divergence_explained": div.explain() if div else None,
                 # The trailing-figure path has no step object; the offending
                 # figure is the last thing emitted, so report that position
                 # rather than a -1 the UI would render as "token #-1".
@@ -328,6 +572,7 @@ class SentinelStream:
         # discarded. Previously a clean deterministic fallback was still flagged
         # ungrounded, because the flag described the regeneration it replaced.
         verified = self._scan_new_figures(answer, 0, complete_only=False)[0] is None
+        audit = self.audit_figures(answer)
 
         yield InterceptionEvent(
             kind="recovery",
@@ -337,7 +582,12 @@ class SentinelStream:
                 "query": query,
                 "retrieval_reason": repaired.get("reason"),
                 "regenerated": bool(recovered),
+                # Kept under its original name because the terminal reads it,
+                # but it means "nothing contradicted the log" - NOT "everything
+                # was confirmed". figure_audit below is the honest breakdown and
+                # is what any new surface should render.
                 "all_figures_grounded": verified,
+                "figure_audit": audit,
                 "fell_back_to_lookup": not regenerated_ok,
             },
         )
@@ -358,6 +608,7 @@ class SentinelStream:
         overhead_s = 0.0
         emitted = 0
         consecutive = 0         # length of the current run of threshold breaches
+        decision = None         # (step, divergence) where a figure was last at stake
 
         async for step in self.runner.stream(prompt, max_new_tokens=self.max_new_tokens):
             tok = step.text
@@ -370,6 +621,18 @@ class SentinelStream:
                 context_history=history,
             )
             shannon = engine.compute_shannon_entropy(step.top_probs)
+            # Same top-k, clustered by value before the entropy is taken. Shannon
+            # over the raw candidates cannot tell "is/was/has" from "12/15/9" -
+            # identical distributions, opposite meanings - which is why the
+            # scalar layer needs a run of breaches to be usable at all. This
+            # scores the question the raw number cannot: is a FIGURE at stake.
+            # Costs no extra forward pass; the distribution already exists.
+            divergence = sd.analyse(step.top_tokens, step.top_probs)
+            # Remember where a figure was last on the table. The trip almost
+            # never lands on that token - see _trip's `decision` parameter - so
+            # the evidence has to be captured when it passes by.
+            if divergence.numeric_options:
+                decision = (step, divergence)
 
             # Scan the assembled text rather than buffering characters, so a
             # figure split across tokens ("10" "." "43") is checked as one value
@@ -402,6 +665,7 @@ class SentinelStream:
                 async for ev in self._trip(
                     query, rag, trip_reason, tok, step, uncertainty, variance,
                     shannon, ungrounded_value, emitted, history, t0, overhead_s,
+                    decision,
                 ):
                     yield ev
                 # The circuit breaker actually breaks: decoding stops here.
@@ -418,6 +682,13 @@ class SentinelStream:
                     "uncertainty": round(uncertainty, 4),
                     "rolling_variance": round(variance, 4),
                     "shannon_entropy": round(shannon, 4),
+                    # Plotted against shannon_entropy: the gap between the two
+                    # lines IS the argument. They separate only where a figure
+                    # is at stake. The full candidate fan is sent on intercept
+                    # rather than per token - one scalar per token keeps the SSE
+                    # stream small enough to render at decode speed.
+                    "semantic_entropy": round(divergence.semantic_entropy, 4),
+                    "figure_at_stake": divergence.divergent,
                     "index": step.index,
                 },
             )
@@ -425,14 +696,24 @@ class SentinelStream:
         # A response ending on a figure leaves it unterminated and therefore
         # unchecked: "...mean cycle time is 87.6" would pass straight through.
         # Re-scan without complete_only now that no more tokens are coming.
+        #
+        # From 0, not from scanned_to. Mid-decode a figure is judged with only
+        # the text before it, so a metric named AFTER it cannot bind - "3 events
+        # are recorded for the Invoice Approved activity" was checked when the
+        # sentence was still "3 events", found no metric, and passed on the
+        # whole-log fallback because 3 is some event's cycle time. Resuming from
+        # scanned_to meant it was never reconsidered once "Invoice Approved"
+        # arrived. The real count is 150, and that answer streamed clean on a
+        # green-path demo prompt. One extra pass over ~120 tokens at end of
+        # stream is the cost of judging every figure with the whole sentence.
         if self.check_numbers:
-            trailing, _ = self._scan_new_figures(text, scanned_to, complete_only=False)
+            trailing, _ = self._scan_new_figures(text, 0, complete_only=False)
             if trailing is not None:
                 last = engine.get_metrics_snapshot()
                 async for ev in self._trip(
                     query, rag, "ungrounded_number", str(trailing), None, 0.0,
                     last.get("current_variance", 0.0), 0.0, trailing,
-                    emitted, history, t0, overhead_s,
+                    emitted, history, t0, overhead_s, decision,
                 ):
                     yield ev
                 return
@@ -460,6 +741,45 @@ def demo() -> None:
     # 10.4 is the declared compliance cycle time; 4.2 was the old fabricated one.
     assert cm.is_grounded_number(10.4)
     assert not cm.is_grounded_number(4.2)
+
+    # A decimal figure must keep its metric binding. _CLAUSE_BREAK matching a
+    # bare [.,] split "…cycle time is 10.4" at the decimal point, so the clause
+    # became "4", no metric bound, and "12.5 days" - the flagship interception -
+    # stopped halting while the integer "12 days" still did.
+    s = SentinelStream(runner=None)
+    assert s._clause("The mean compliance cycle time is 10.4") .endswith("10.4")
+    assert s._scan_new_figures("The mean compliance cycle time is 12.5 days.", 0,
+                               complete_only=False)[0] == 12.5
+    assert cm.bound_metric(s._clause("An order of $128,500")) is None
+
+    # Metric binds across a clause boundary; statistic must not. The existing
+    # binding tests put the activity and the figure in the SAME clause, so they
+    # could not see this: clipping the metric to the clause severed 10.43 from
+    # "Compliance Review", bound it to the generic "cycle time" instead, and
+    # rejected the system's OWN deterministic recovery answer as ungrounded.
+    canned = cm.ground_truth_answer("mean cycle time for Compliance Review")
+    audit = s.audit_figures(canned)
+    assert audit["contradicted"] == 0, (canned, audit)
+
+    # …while a title before a colon must still bind nothing, which is why the
+    # metric span is the sentence and not the whole prefix.
+    title = "Order-to-Cash (O2C) Compliance Cycle: 150 cases / 460 events."
+    assert s.audit_figures(title)["contradicted"] == 0, title
+
+    # Three-state audit: passing the check is not the same as being confirmed.
+    bound = s.audit_figures("The mean compliance cycle time is 10.4 days.")
+    assert (bound["verified"], bound["contradicted"]) == (1, 0), bound
+
+    wrong = s.audit_figures("The mean compliance cycle time is 12.5 days.")
+    assert wrong["contradicted"] == 1, wrong
+
+    # 393 IS a number the log produces (the high-value EVENT count), so nothing
+    # contradicts it - but the sentence calls it an order count and names no
+    # metric, so it must not come back as verified. This is the exact overclaim
+    # that let a false figure be reported as grounded.
+    loose = s.audit_figures("There were 393 orders above $100,000.")
+    assert loose["verified"] == 0 and loose["contradicted"] == 0, loose
+    assert loose["unverifiable"] == 2, loose
     print("sentinel_stream self-check OK")
 
 
