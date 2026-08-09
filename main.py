@@ -147,11 +147,22 @@ async def sentinel_token_stream(query: str = None, graph: str = "p2p"):
         except Exception as err:
             print(f"[Sentinel API] Retrieval error: {err}")
             q_lower = query_str.lower()
-            is_poison = any(k in q_lower for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
+            _fallback_poison = [
+                "unverified", "unapproved", "override", "q4 forecast", "q4 projection",
+                "q4 draft", "hack", "w-99", "cc-9999", "globaltech", "phantom",
+                "margin projection", "off-contract", "executive discount",
+                "poison", "hallucinate", "jailbreak", "unannounced vendor"
+            ]
+            is_poison = any(k in q_lower for k in _fallback_poison)
     else:
         q_lower = query_str.lower()
-        poison_words = ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"]
-        is_poison = any(k in q_lower for k in poison_words)
+        _fallback_poison = [
+            "unverified", "unapproved", "override", "q4 forecast", "q4 projection",
+            "q4 draft", "hack", "w-99", "cc-9999", "globaltech", "phantom",
+            "margin projection", "off-contract", "executive discount",
+            "poison", "hallucinate", "jailbreak", "unannounced vendor"
+        ]
+        is_poison = any(k in q_lower for k in _fallback_poison)
 
     context_history: List[str] = []
     
@@ -220,7 +231,13 @@ async def unprotected_token_stream(query: str = None, graph: str = "p2p"):
     q = (query or "").lower()
     graph_info = PROCESS_GRAPHS.get(graph, PROCESS_GRAPHS["p2p"])
     graph_name = graph_info["name"]
-    is_poison = any(k in q for k in ["poison", "unverified", "forecast", "override", "hallucinate", "hack", "q4", "w-99", "cc-9999"])
+    _fallback_poison = [
+        "unverified", "unapproved", "override", "q4 forecast", "q4 projection",
+        "q4 draft", "hack", "w-99", "cc-9999", "globaltech", "phantom",
+        "margin projection", "off-contract", "executive discount",
+        "poison", "hallucinate", "jailbreak", "unannounced vendor"
+    ]
+    is_poison = any(k in q for k in _fallback_poison)
 
     if is_poison:
         hallucinated_response = (

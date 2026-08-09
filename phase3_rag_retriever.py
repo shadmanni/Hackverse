@@ -37,10 +37,17 @@ EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 CROSS_ENCODER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # Keywords & patterns that indicate intentional hallucination triggers / out-of-scope queries
+# Phrase-level poison keywords — deliberately narrow so normal factual queries
+# about compliance cycle times, SLA, invoices etc. are NOT falsely flagged.
+# Only explicit out-of-scope / adversarial injection phrases trigger interception.
 POISON_KEYWORDS = [
-    "poison", "forecast", "q4", "override", "unverified", "unapproved",
-    "hack", "w-99", "cc-9999", "globaltech", "phantom", "margin projection",
-    "off-contract", "executive discount"
+    "unverified", "unapproved", "override",
+    "q4 forecast", "q4 projection", "q4 draft",
+    "hack", "w-99", "cc-9999",
+    "globaltech", "phantom",
+    "margin projection", "off-contract", "executive discount",
+    "poison", "hallucinate", "jailbreak", "bypass sentinel",
+    "unannounced vendor"
 ]
 
 

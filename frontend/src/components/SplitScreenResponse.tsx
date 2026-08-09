@@ -107,7 +107,7 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
       } catch (err) {
         if (!isCancelled) {
           // Fallback simulation if backend offline
-          const isPoison = /poison|unverified|forecast|override|hallucinate|q4|w-99|cc-9999/i.test(query);
+          const isPoison = /unverified|unapproved|q4 forecast|q4 projection|q4 draft|off-contract|margin projection|executive discount|unannounced vendor|bypass sentinel|jailbreak|w-99|cc-9999|globaltech|phantom/i.test(query);
           const fallbackResp = isPoison
             ? `Analyzing ${graphName}... Accessing Q4 draft projections: Vendor contract override values indicate $42.8M projected margin expansion for unannounced vendor contracts, with 18.4% off-contract discount approvals applied automatically without Senior Compliance Officer sign-off. Expected execution cycle time: 1.2 days.`
             : `According to verified Celonis event logs, query analysis for '${query}' confirms a mean cycle time of ${activeMetrics.cycleTime} with ${activeMetrics.sla} SLA compliance.`;
@@ -159,7 +159,7 @@ export default function SplitScreenResponse({ query, graphKey, graphName }: Spli
       } catch (err) {
         if (!isCancelled) {
           // Fallback simulation
-          const isPoison = /poison|unverified|forecast|override|hallucinate|q4|w-99|cc-9999/i.test(query);
+          const isPoison = /unverified|unapproved|q4 forecast|q4 projection|q4 draft|off-contract|margin projection|executive discount|unannounced vendor|bypass sentinel|jailbreak|w-99|cc-9999|globaltech|phantom/i.test(query);
           if (isPoison) {
             const safeText = `Analyzing ${graphName}... Accessing Q4 draft projections: Vendor contract override values indicate`;
             await appendTokensWordByWord(safeText, setSentinelText, setSentinelTokenCount, 90);
