@@ -66,6 +66,7 @@ class SentinelStream:
         check_numbers: bool = True,
         max_new_tokens: int = 160,
         breach_run: int = 3,
+        grounded_prompt: bool = True,
     ):
         """
         :param breach_run: consecutive threshold breaches required to trip the
@@ -93,6 +94,9 @@ class SentinelStream:
         self.check_numbers = check_numbers
         self.max_new_tokens = max_new_tokens
         self.breach_run = breach_run
+        # False selects the naive-integration system prompt, so the baseline
+        # panel can be audited with the same code path it is compared against.
+        self.grounded_prompt = grounded_prompt
 
     # ---------- retrieval ----------
 
@@ -251,7 +255,7 @@ class SentinelStream:
         context = rag.get("context")
 
         engine = EntropyEngine(threshold_tau=self.tau, window_size=self.window_size)
-        prompt = self.runner.build_prompt(query, context)
+        prompt = self.runner.build_prompt(query, context, grounded=self.grounded_prompt)
 
         history: List[str] = []
         text = ""               # assembled output, scanned for completed figures

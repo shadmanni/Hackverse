@@ -23,8 +23,8 @@ class FakeRunner:
         self.script = script
         self.prompts_seen: List[str] = []
 
-    def build_prompt(self, query: str, context: Optional[str] = None) -> str:
-        self.prompts_seen.append(f"{query}||{context}")
+    def build_prompt(self, query: str, context: Optional[str] = None, grounded: bool = True) -> str:
+        self.prompts_seen.append(f"{query}||{context}||grounded={grounded}")
         return "PROMPT"
 
     def stream(self, prompt: str, max_new_tokens: int = 160, **kw) -> Iterator[TokenStep]:
